@@ -59,3 +59,4 @@ model_params:
 
 loss_params:
   base_lr: 0.0001
+  TMA_epoch: 1

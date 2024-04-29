@@ -14,6 +14,7 @@ import random
 
 from meldataset import build_dataloader
 from modules.commons import *
+from losses import *
 from optimizers import build_optimizer
 import time
 
@@ -22,6 +23,7 @@ from accelerate.utils import LoggerType
 from accelerate import DistributedDataParallelKwargs
 
 from torch.utils.tensorboard import SummaryWriter
+import torchaudio
 
 import logging
 from accelerate.logging import get_logger
@@ -80,7 +82,7 @@ def main(args):
 
 
     with accelerator.main_process_first():
-        pitch_extractor = load_F0_models(config['F0_path'])
+        pitch_extractor = load_F0_models(config['F0_path']).to(device)
 
     scheduler_params = {
         "warmup_steps": 200,
@@ -112,6 +114,13 @@ def main(args):
             start_epoch = 0
             iters = 0
 
+    blank_index = train_dataloader.dataset.text_cleaner.word_index_dictionary[" "]  # get blank index
+    phn_criterion = {
+        "ce": nn.CrossEntropyLoss(ignore_index=-1),
+        "ctc": torch.nn.CTCLoss(blank=blank_index, zero_infinity=True),
+    }
+    spk_criterion = FocalLoss(gamma=2).to(device)
+
 
     for epoch in range(start_epoch, epochs):
         start_time = time.time()
@@ -135,14 +144,145 @@ def main(args):
             wave_tensors = wave_tensors.unsqueeze(1)
             enc_out = model.fa_encoder(wave_tensors)
             mels = mels[..., :enc_out.size(2)]
+            mel_input_length = torch.clamp(mel_input_length, 0, enc_out.size(2))
             mel_prosody = mels[:, :20, :]
             vq_post_emb, vq_id, commit_loss, quantized, spk_embs = model.fa_decoder(enc_out, mel_prosody, eval_vq=False, vq=True)
 
-            # random slice segments
-            segment_len = min(max_frame_len, enc_out.size(2))
+            # get clips
+            mel_seg_len = min([int(mel_input_length.min().item()), max_frame_len])
+
+            en = [[], [], []]
+            gt_mel_seg = []
+            wav_seg = []
+            # f0 = []
+
+            for bib in range(len(mel_input_length)):
+                mel_length = int(mel_input_length[bib].item())
+
+                random_start = np.random.randint(0, mel_length - mel_seg_len)
+                for q, layer_q in enumerate(quantized):
+                    en[q].append(layer_q[bib, :, random_start:random_start + mel_seg_len])
+                gt_mel_seg.append(mels[bib, :, random_start:random_start + mel_seg_len])
+
+                y = waves[bib][random_start * 200:(random_start + mel_seg_len) * 200]
+                wav_seg.append(torch.from_numpy(y).to(device))
+                # # F0
+                # f0.append(F0s[bib, (random_start * 2):((random_start + mel_len) * 2)])
+
+            en = [torch.stack(e) for e in en]
+            gt_mel_seg = torch.stack(gt_mel_seg).detach()
+            # f0 = torch.stack(f0).detach()
+
+            wav_seg = torch.stack(wav_seg).float().detach()
+
+            with torch.no_grad():
+                real_norm = log_norm(mels.unsqueeze(1)).squeeze(1).detach()
+                F0_real, _, _ = pitch_extractor(mels.unsqueeze(1))
+                # F0_real = F0_real.unsqueeze(0) if batch_size == 1 else F0_real
 
 
-            out = model.fa_decoder(enc_out, mel_prosody, eval_vq=False, vq=False, quantized=quantized, speaker_embedding=spk_embs)
+            out = model.fa_decoder(None, None, eval_vq=False, vq=False, quantized=en, speaker_embedding=spk_embs)
+            pred_wave = out['audio']
+
+            # generator loss
+            wav_seg = wav_seg.unsqueeze(1)
+            y_disc_r, fmap_r = model.stft_disc(wav_seg.contiguous())
+            y_disc_gen, fmap_gen = model.stft_disc(pred_wave.contiguous())
+            y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = model.mpd(
+                wav_seg.contiguous(), pred_wave.contiguous())
+            y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = model.msd(
+                wav_seg.contiguous(), pred_wave.contiguous())
+            # for decoder reconstruction
+            wav_tot_loss, rec_loss, adv_loss, feat_loss_tot, d_weight = loss_g(
+                commit_loss,
+                wav_seg,
+                pred_wave,
+                fmap_r,
+                fmap_gen,
+                y_disc_r,
+                y_disc_gen,
+                iters,
+                y_df_hat_r,
+                y_df_hat_g,
+                y_ds_hat_r,
+                y_ds_hat_g,
+                fmap_f_r,
+                fmap_f_g,
+                fmap_s_r,
+                fmap_s_g,
+            )
+            # for f0 and energy prediction
+            prosody_latent = quantized[0]
+            content_latent = quantized[1]
+            res_latent = quantized[2]
+            pred_f0, pred_uv = model.prosody_f0n_predictor(prosody_latent)
+            c_pred_f0, c_pred_uv = model.content_f0n_predictor(content_latent)
+            r_pred_f0, r_pred_uv = model.res_f0n_predictor(res_latent)
+            f0_loss, uv_loss, c_f0_loss, c_uv_loss, r_f0_loss, r_uv_loss = 0, 0, 0, 0, 0, 0
+            for bib, mel_len in enumerate(mel_input_length):
+                f0_loss += F.smooth_l1_loss(F0_real[bib, :mel_len], pred_f0[bib, :mel_len].squeeze(-1))
+                uv_loss += F.smooth_l1_loss(real_norm[bib, :mel_len], pred_uv[bib, :mel_len].squeeze(-1))
+                c_f0_loss += F.smooth_l1_loss(F0_real[bib, :mel_len], c_pred_f0[bib, :mel_len].squeeze(-1))
+                c_uv_loss += F.smooth_l1_loss(real_norm[bib, :mel_len], c_pred_uv[bib, :mel_len].squeeze(-1))
+                r_f0_loss += F.smooth_l1_loss(F0_real[bib, :mel_len], r_pred_f0[bib, :mel_len].squeeze(-1))
+                r_uv_loss += F.smooth_l1_loss(real_norm[bib, :mel_len], r_pred_uv[bib, :mel_len].squeeze(-1))
+            f0_loss, uv_loss, c_f0_loss, c_uv_loss, r_f0_loss, r_uv_loss = (
+                f0_loss / len(mel_input_length), uv_loss / len(mel_input_length), c_f0_loss / len(mel_input_length),
+                c_uv_loss / len(mel_input_length), r_f0_loss / len(mel_input_length), r_uv_loss / len(mel_input_length))
+
+            # for phoneme prediction
+
+            ppgs, s2s_pred, s2s_attn = model.content_phoneme_predictor(content_latent, texts, langs,
+                                                                       mel_lens=mel_input_length, text_lens=input_lengths)
+            ctc_loss = phn_criterion['ctc'](ppgs.log_softmax(dim=2).transpose(0, 1), texts, mel_input_length, input_lengths)
+            s2s_loss = 0
+            for _s2s_pred, _text_input, _text_length in zip(s2s_pred, texts, input_lengths):
+                s2s_loss += phn_criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
+            s2s_loss /= texts.size(0)
+
+            p_ppgs, p_s2s_pred, p_s2s_attn = model.prosody_phoneme_predictor[1](model.prosody_phoneme_predictor[0](prosody_latent),
+                                                    texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
+            p_ctc_loss = phn_criterion['ctc'](p_ppgs.log_softmax(dim=2).transpose(0, 1), texts, mel_input_length, input_lengths)
+            p_s2s_loss = 0
+            for _s2s_pred, _text_input, _text_length in zip(p_s2s_pred, texts, input_lengths):
+                p_s2s_loss += phn_criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
+            p_s2s_loss /= texts.size(0)
+
+            r_ppgs, r_s2s_pred, r_s2s_attn = model.res_phoneme_predictor[1](model.res_phoneme_predictor[0](res_latent),
+                                                    texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
+            r_ctc_loss = phn_criterion['ctc'](r_ppgs.log_softmax(dim=2).transpose(0, 1), texts, mel_input_length, input_lengths)
+            r_s2s_loss = 0
+            for _s2s_pred, _text_input, _text_length in zip(r_s2s_pred, texts, input_lengths):
+                r_s2s_loss += phn_criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
+            r_s2s_loss /= texts.size(0)
+
+            # speaker prediction loss
+            spk_pred_logits = model.timbre_predictor(spk_embs, speaker_labels)
+            bsz = quantized[2].shape[0]
+            res_mask = np.random.choice(
+                [0, 1],
+                size=bsz,
+                p=[
+                    0.75,
+                    1 - 0.75,
+                ],
+            )
+            res_mask = (
+                torch.from_numpy(res_mask).unsqueeze(1).unsqueeze(1)
+            )  # (B, 1, 1)
+            res_mask = res_mask.to(
+                device=quantized[2].device, dtype=quantized[2].dtype
+            )
+            x = (
+                    quantized[0].detach()
+                    + quantized[1].detach()
+                    + quantized[2] * res_mask
+            )
+            x_spk_embs = model.x_timbre_encoder(x)[0]
+            x_spk_pred_logits = model.x_timbre_predictor(x_spk_embs, speaker_labels)
+
+            loss_spk = spk_criterion(spk_pred_logits, speaker_labels)
+            x_loss_spk = spk_criterion(x_spk_pred_logits, speaker_labels)
 
             optimizer.zero_grad()
             accelerator.backward(loss)

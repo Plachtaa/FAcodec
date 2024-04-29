@@ -168,6 +168,13 @@ def clip_grad_value_(parameters, clip_value, norm_type=2):
   total_norm = total_norm ** (1. / norm_type)
   return total_norm
 
+def log_norm(x, mean=-4, std=4, dim=2):
+  """
+  normalized log mel -> mel -> norm -> log(norm)
+  """
+  x = torch.log(torch.exp(x * std + mean).norm(dim=dim))
+  return x
+
 def load_F0_models(path):
   # load F0 model
   from .JDC.model import JDCNet
@@ -180,11 +187,11 @@ def load_F0_models(path):
 
 
 def build_model(args):
-  from facodec import FACodecEncoderV2, FACodecDecoderV2
+  from facodec import FACodecEncoderV2, FACodecDecoderV2, CNNLSTM, ArcMarginProduct
   from .phoneme_predictor import PhonemePredictor
   from gradient_reversal import GradientReversal
-  from .prosody_predictor import ProsodyPredictor
   from .msstftd import MultiScaleSTFTDiscriminator
+  from .discriminators import MultiScaleDiscriminator, MultiPeriodDiscriminator
 
   fa_encoder = FACodecEncoderV2(
     ngf=32,
@@ -205,10 +212,10 @@ def build_model(args):
     codebook_size_prosody=10,
     codebook_size_content=10,
     codebook_size_residual=10,
-    use_gr_x_timbre=True,
-    use_gr_residual_f0=True,
+    use_gr_x_timbre=False,
+    use_gr_residual_f0=False,
     use_gr_residual_phone=False,
-    use_gr_content_f0=True,
+    use_gr_content_f0=False,
     use_gr_prosody_phone=False,
   )
 
@@ -242,19 +249,30 @@ def build_model(args):
     )
   )
 
-  # prosody_f0n_predictor = ProsodyPredictor(d_hid=256, dropout=0.2)
-  #
-  # content_f0n_predictor = nn.Sequential(
-  #   GradientReversal(alpha=1.0),
-  #   ProsodyPredictor(d_hid=256, dropout=0.2)
-  # )
-  #
-  # res_f0n_predictor = nn.Sequential(
-  #   GradientReversal(alpha=1.0),
-  #   ProsodyPredictor(d_hid=256, dropout=0.2)
-  # )
+  prosody_f0n_predictor = CNNLSTM(indim=256, outdim=1, head=2)
 
-  discriminator = MultiScaleSTFTDiscriminator(filters=32)
+  content_f0n_predictor = nn.Sequential(
+    GradientReversal(alpha=1.0),
+    CNNLSTM(indim=256, outdim=1, head=2)
+  )
+
+  res_f0n_predictor = nn.Sequential(
+    GradientReversal(alpha=1.0),
+    CNNLSTM(indim=256, outdim=1, head=2)
+  )
+
+  timbre_predictor = ArcMarginProduct(256, 114514, s=30, m=0.5)
+
+  x_timbre_encoder = nn.Sequential(
+    GradientReversal(alpha=1),
+    CNNLSTM(256, 256, 1, global_pred=True),
+  )
+
+  x_timbre_predictor = ArcMarginProduct(256, 114514, s=30, m=0.5)
+
+  msd = MultiScaleDiscriminator()
+  mpd = MultiPeriodDiscriminator()
+  stft_disc = MultiScaleSTFTDiscriminator(filters=32)
 
   nets = Munch(
     fa_encoder=fa_encoder,
@@ -262,10 +280,15 @@ def build_model(args):
     content_phoneme_predictor=content_phoneme_predictor,
     prosody_phoneme_predictor=prosody_phoneme_predictor,
     res_phoneme_predictor=res_phoneme_predictor,
-    # prosody_f0n_predictor=prosody_f0n_predictor,
-    # content_f0n_predictor=content_f0n_predictor,
-    # res_f0n_predictor=res_f0n_predictor,
-    discriminator=discriminator,
+    prosody_f0n_predictor=prosody_f0n_predictor,
+    content_f0n_predictor=content_f0n_predictor,
+    res_f0n_predictor=res_f0n_predictor,
+    timbre_predictor=timbre_predictor,
+    x_timbre_encoder=x_timbre_encoder,
+    x_timbre_predictor=x_timbre_predictor,
+    msd=msd,
+    mpd=mpd,
+    stft_disc=stft_disc,
   )
 
   return nets

@@ -23,7 +23,6 @@ class PhonemePredictor(torch.nn.Module):
     def __init__(self, d_model=512, nhead=8, num_layers=6, n_token=178, n_lang=6):
         super(PhonemePredictor, self).__init__()
         self.n_token = n_token
-        self.to_mfcc = MFCC()
 
         self.mel_encoder = TransformerEncoder(
             TransformerEncoderLayer(
@@ -53,7 +52,7 @@ class PhonemePredictor(torch.nn.Module):
         self.text_embed = nn.Embedding(n_token + 1, d_model) # plus bos token
         self.lang_embed = nn.Embedding(n_lang, d_model)
         self.bos_idx = n_token
-        self.audio_prenet = ConvNorm(40, d_model, kernel_size=7, padding=3, stride=1)
+        self.audio_prenet = ConvNorm(256, d_model, kernel_size=7, padding=3, stride=1)
         self.nhead = nhead
         self.text_predictor = nn.Linear(d_model, n_token)
 
@@ -77,7 +76,6 @@ class PhonemePredictor(torch.nn.Module):
             attn (torch.tensor): B x 1 x T1 x T2 attention mask.
                                  Final dim T2 should sum to 1
         """
-        mels = self.to_mfcc(mels)
         B = mels.shape[0]
         # append bos token
         texts = torch.cat([torch.ones([B, 1], dtype=torch.int).to(texts.device) * self.bos_idx, texts], dim=1)

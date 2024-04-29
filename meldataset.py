@@ -60,9 +60,9 @@ class TextCleaner:
 np.random.seed(1)
 random.seed(1)
 SPECT_PARAMS = {
-    "n_fft": 1024,
-    "win_length": 800,
-    "hop_length": 200,
+    "n_fft": 2048,
+    "win_length": 1200,
+    "hop_length": 300,
 }
 MEL_PARAMS = {
     "n_mels": 80,
@@ -74,7 +74,10 @@ mean, std = -4, 4
 
 
 def preprocess(wave):
+    # input is desired to be 16000hz, this operation resamples it to 24000hz
+    # wave = wave.unsqueeze(0)
     wave_tensor = torch.from_numpy(wave).float()
+    wave_tensor = torchaudio.functional.resample(wave_tensor, 16000, 24000)
     mel_tensor = to_mel(wave_tensor)
     mel_tensor = (torch.log(1e-5 + mel_tensor.unsqueeze(0)) - mean) / std
     return mel_tensor
@@ -140,7 +143,7 @@ class FilePathDataset(torch.utils.data.Dataset):
 
         mel_tensor = preprocess(wave).squeeze()
 
-        mel_len = int(np.ceil(wave.shape[0] / SPECT_PARAMS["hop_length"]))
+        mel_len = int(np.ceil(wave.shape[0] / SPECT_PARAMS["hop_length"] * 1.5))
         mel_tensor = mel_tensor[:, :mel_len]
 
         acoustic_feature = mel_tensor.squeeze()
