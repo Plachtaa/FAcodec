@@ -38,7 +38,7 @@ def process_line(line):
     # if os.path.exists(txt_path):
     #     return None
     # assert os.path.exists(wav_path)
-    formatted_sid = f"mls-{language}-{sid}"
+    formatted_sid = f"vctk-{language}-{sid}"
 
     # phonemize
     text_norm = text.rstrip("\n")
@@ -103,7 +103,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', type=str, default='E:/datasets/VCTK/')
+    parser.add_argument('--root', type=str, default='/home/azureuser/vctk/')
     parser.add_argument('--num_processes', type=int, default=cpu_count())
     args = parser.parse_args()
 

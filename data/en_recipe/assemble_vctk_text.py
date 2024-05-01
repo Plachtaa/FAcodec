@@ -39,7 +39,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', type=str, default='E:/datasets/VCTK/')
+    parser.add_argument('--root', type=str, default='/home/azureuser/vctk/')
     args = parser.parse_args()
 
     main(args)

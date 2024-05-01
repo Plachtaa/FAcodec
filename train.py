@@ -12,7 +12,7 @@ warnings.simplefilter('ignore')
 # load packages
 import random
 
-from meldataset import build_dataloader
+from meldataset import build_dataloader, mel_spectrogram
 from modules.commons import *
 from losses import *
 from optimizers import build_optimizer
@@ -66,13 +66,15 @@ def main(args):
     root_path = data_params['root_path']
     min_length = data_params['min_length']
     max_frame_len = config.get('max_len', 80)
+    discriminator_iter_start = config['loss_params'].get('discriminator_iter_start', 0)
+    loss_params = config.get('loss_params', {})
 
     train_dataloader = build_dataloader(train_path,
                                         root_path,
                                         min_length=min_length,
                                         batch_size=batch_size,
                                         batch_length=None,
-                                        num_workers=0,
+                                        num_workers=4,
                                         rank=accelerator.local_process_index,
                                         world_size=accelerator.num_processes,
                                         dataset_config={},
@@ -121,10 +123,12 @@ def main(args):
     }
     spk_criterion = FocalLoss(gamma=2).to(device)
 
+    train_dataloader = accelerator.prepare(train_dataloader)
+
 
     for epoch in range(start_epoch, epochs):
         start_time = time.time()
-        train_dataloader.sampler.set_epoch(epoch)
+        # train_dataloader.sampler.set_epoch(epoch)
         _ = [model[key].train() for key in model]
 
         for i, batch in enumerate(train_dataloader):
@@ -186,31 +190,43 @@ def main(args):
 
             # generator loss
             wav_seg = wav_seg.unsqueeze(1)
-            y_disc_r, fmap_r = model.stft_disc(wav_seg.contiguous())
-            y_disc_gen, fmap_gen = model.stft_disc(pred_wave.contiguous())
-            y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = model.mpd(
-                wav_seg.contiguous(), pred_wave.contiguous())
-            y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = model.msd(
-                wav_seg.contiguous(), pred_wave.contiguous())
-            # for decoder reconstruction
-            wav_tot_loss, rec_loss, adv_loss, feat_loss_tot, d_weight = loss_g(
-                commit_loss,
-                wav_seg,
-                pred_wave,
-                fmap_r,
-                fmap_gen,
-                y_disc_r,
-                y_disc_gen,
-                iters,
-                y_df_hat_r,
-                y_df_hat_g,
-                y_ds_hat_r,
-                y_ds_hat_g,
-                fmap_f_r,
-                fmap_f_g,
-                fmap_s_r,
-                fmap_s_g,
-            )
+            if iters >= discriminator_iter_start:
+                optimizer.zero_grad("mrd")
+                optimizer.zero_grad("mpd")
+                # MPD
+                y_df_hat_r, y_df_hat_g, _, _ = model.mpd(wav_seg, pred_wave.detach())
+                loss_disc_f, losses_disc_f_r, losses_disc_f_g = discriminator_loss(y_df_hat_r, y_df_hat_g)
+
+                # MSD
+                y_ds_hat_r, y_ds_hat_g, _, _ = model.mrd(wav_seg, pred_wave.detach())
+                loss_disc_s, losses_disc_s_r, losses_disc_s_g = discriminator_loss(y_ds_hat_r, y_ds_hat_g)
+
+                loss_disc_all = loss_disc_s + loss_disc_f
+                accelerator.backward(loss_disc_all)
+                optimizer.step("mrd")
+                optimizer.step("mpd")
+
+                optimizer.zero_grad("mrd")
+                optimizer.zero_grad("mpd")
+            else:
+                loss_disc_all = torch.FloatTensor([0]).to(device)
+                grad_norm_mpd = 0.
+                grad_norm_mrd = 0.
+
+
+            y_g_hat_mel = mel_spectrogram(pred_wave.squeeze(1), n_fft=1024, num_mels=80, sampling_rate=16000,
+                                        hop_size=200,
+                                        win_size=800,
+                                        fmin=0,
+                                        fmax=8000,
+                                     )
+            gt_mel = mel_spectrogram(wav_seg.squeeze(1), n_fft=1024, num_mels=80, sampling_rate=16000,
+                                        hop_size=200,
+                                        win_size=800,
+                                        fmin=0,
+                                        fmax=8000,
+                                     )
+            mel_loss = F.l1_loss(y_g_hat_mel, gt_mel)
             # for f0 and energy prediction
             prosody_latent = quantized[0]
             content_latent = quantized[1]
@@ -230,6 +246,8 @@ def main(args):
                 f0_loss / len(mel_input_length), uv_loss / len(mel_input_length), c_f0_loss / len(mel_input_length),
                 c_uv_loss / len(mel_input_length), r_f0_loss / len(mel_input_length), r_uv_loss / len(mel_input_length))
 
+            tot_f0_loss, tot_uv_loss = (f0_loss + c_f0_loss + r_f0_loss)/3, (uv_loss + c_uv_loss + r_uv_loss)/3
+
             # for phoneme prediction
 
             ppgs, s2s_pred, s2s_attn = model.content_phoneme_predictor(content_latent, texts, langs,
@@ -240,21 +258,32 @@ def main(args):
                 s2s_loss += phn_criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
             s2s_loss /= texts.size(0)
 
-            p_ppgs, p_s2s_pred, p_s2s_attn = model.prosody_phoneme_predictor[1](model.prosody_phoneme_predictor[0](prosody_latent),
-                                                    texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
+            if accelerator.num_processes == 1:
+                p_ppgs, p_s2s_pred, p_s2s_attn = model.prosody_phoneme_predictor[1](model.prosody_phoneme_predictor[0](prosody_latent),
+                                                        texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
+            else:
+                p_ppgs, p_s2s_pred, p_s2s_attn = model.prosody_phoneme_predictor.module[1](model.prosody_phoneme_predictor.module[0](prosody_latent),
+                                                        texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
             p_ctc_loss = phn_criterion['ctc'](p_ppgs.log_softmax(dim=2).transpose(0, 1), texts, mel_input_length, input_lengths)
             p_s2s_loss = 0
             for _s2s_pred, _text_input, _text_length in zip(p_s2s_pred, texts, input_lengths):
                 p_s2s_loss += phn_criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
             p_s2s_loss /= texts.size(0)
 
-            r_ppgs, r_s2s_pred, r_s2s_attn = model.res_phoneme_predictor[1](model.res_phoneme_predictor[0](res_latent),
-                                                    texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
+            if accelerator.num_processes == 1:
+                r_ppgs, r_s2s_pred, r_s2s_attn = model.res_phoneme_predictor[1](model.res_phoneme_predictor[0](res_latent),
+                                                        texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
+            else:
+                r_ppgs, r_s2s_pred, r_s2s_attn = model.res_phoneme_predictor.module[1](model.res_phoneme_predictor.module[0](res_latent),
+                                                        texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
             r_ctc_loss = phn_criterion['ctc'](r_ppgs.log_softmax(dim=2).transpose(0, 1), texts, mel_input_length, input_lengths)
             r_s2s_loss = 0
             for _s2s_pred, _text_input, _text_length in zip(r_s2s_pred, texts, input_lengths):
                 r_s2s_loss += phn_criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
             r_s2s_loss /= texts.size(0)
+
+            tot_ctc_loss = (ctc_loss + p_ctc_loss + r_ctc_loss)/3
+            tot_s2s_loss = (s2s_loss + p_s2s_loss + r_s2s_loss)/3
 
             # speaker prediction loss
             spk_pred_logits = model.timbre_predictor(spk_embs, speaker_labels)
@@ -281,23 +310,53 @@ def main(args):
             x_spk_embs = model.x_timbre_encoder(x)[0]
             x_spk_pred_logits = model.x_timbre_predictor(x_spk_embs, speaker_labels)
 
-            loss_spk = spk_criterion(spk_pred_logits, speaker_labels)
-            x_loss_spk = spk_criterion(x_spk_pred_logits, speaker_labels)
+            spk_loss = spk_criterion(spk_pred_logits, speaker_labels)
+            x_spk_loss = spk_criterion(x_spk_pred_logits, speaker_labels)
+
+            tot_spk_loss = (spk_loss + x_spk_loss)/2
+
+            if iters >= discriminator_iter_start:
+                # MPD loss
+                y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = model.mpd(wav_seg, pred_wave)
+                loss_fm_f = feature_loss(fmap_f_r, fmap_f_g)
+                loss_gen_f, losses_gen_f = generator_loss(y_df_hat_g)
+
+                # MRD loss
+                y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = model.mrd(wav_seg, pred_wave)
+                loss_fm_s = feature_loss(fmap_s_r, fmap_s_g)
+                loss_gen_s, losses_gen_s = generator_loss(y_ds_hat_g)
+                loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + mel_loss * 5 \
+                + tot_f0_loss * 1 + tot_uv_loss * 1 + tot_ctc_loss * 1 + tot_s2s_loss * 1 + tot_spk_loss * 1 + commit_loss.sum() * 0.15
+            else:
+                loss_gen_all = mel_loss * 5 \
+                + tot_f0_loss * 1 + tot_uv_loss * 1 + tot_ctc_loss * 1 + tot_s2s_loss * 1 + tot_spk_loss * 1 + commit_loss.sum() * 0.15
 
             optimizer.zero_grad()
-            accelerator.backward(loss)
-            grad_norm_g = torch.nn.utils.clip_grad_norm_(model.pllm.parameters(), 1000.)
-            grad_norm_g2 = torch.nn.utils.clip_grad_norm_(model.prosody_encoder.parameters(), 1000.)
-            # grad_norm_g3 = torch.nn.utils.clip_grad_norm_(model.prosody_resampler.parameters(), 1000.)
-            grad_norm_g4 = torch.nn.utils.clip_grad_norm_(model.p_bert_encoder.parameters(), 1000.)
-            # torch.nn.utils.clip_grad_value_(model.pllm.parameters(), 1000.)
-            # torch.nn.utils.clip_grad_value_(model.prosody_encoder.parameters(), 1000.)
-            # torch.nn.utils.clip_grad_value_(model.prosody_resampler.parameters(), 1000.)
-            # torch.nn.utils.clip_grad_value_(model.p_bert_encoder.parameters(), 1000.)
-            optimizer.step('pllm')
-            optimizer.step('prosody_encoder')
-            # optimizer.step('prosody_resampler')
-            optimizer.step('p_bert_encoder')
+            accelerator.backward(loss_gen_all)
+            grad_norm_g = torch.nn.utils.clip_grad_norm_(model.fa_encoder.parameters(), 1000.0)
+            grad_norm_g2 = torch.nn.utils.clip_grad_norm_(model.fa_decoder.parameters(), 1000.0)
+            grad_norm_g3 = torch.nn.utils.clip_grad_norm_(model.prosody_f0n_predictor.parameters(), 1000.0)
+            grad_norm_g4 = torch.nn.utils.clip_grad_norm_(model.content_f0n_predictor.parameters(), 1000.0)
+            grad_norm_g5 = torch.nn.utils.clip_grad_norm_(model.res_f0n_predictor.parameters(), 1000.0)
+            grad_norm_g6 = torch.nn.utils.clip_grad_norm_(model.content_phoneme_predictor.parameters(), 1000.0)
+            grad_norm_g7 = torch.nn.utils.clip_grad_norm_(model.prosody_phoneme_predictor.parameters(), 1000.0)
+            grad_norm_g8 = torch.nn.utils.clip_grad_norm_(model.res_phoneme_predictor.parameters(), 1000.0)
+            grad_norm_g9 = torch.nn.utils.clip_grad_norm_(model.timbre_predictor.parameters(), 1000.0)
+            grad_norm_g10 = torch.nn.utils.clip_grad_norm_(model.x_timbre_encoder.parameters(), 1000.0)
+            grad_norm_g11 = torch.nn.utils.clip_grad_norm_(model.x_timbre_predictor.parameters(), 1000.0)
+
+            optimizer.step('fa_encoder')
+            optimizer.step('fa_decoder')
+            optimizer.step('prosody_f0n_predictor')
+            optimizer.step('content_f0n_predictor')
+            optimizer.step('res_f0n_predictor')
+            optimizer.step('content_phoneme_predictor')
+            optimizer.step('prosody_phoneme_predictor')
+            optimizer.step('res_phoneme_predictor')
+            optimizer.step('timbre_predictor')
+            optimizer.step('x_timbre_encoder')
+            optimizer.step('x_timbre_predictor')
+
 
             # optimizer.step()
             # train time count end
@@ -305,51 +364,62 @@ def main(args):
 
             if iters % log_interval == 0 and accelerator.is_main_process:
                 with torch.no_grad():
-                    cur_lr = optimizer.schedulers['pllm'].get_last_lr()[0] if i != 0 else 0
+                    cur_lr = optimizer.schedulers['fa_encoder'].get_last_lr()[0] if i != 0 else 0
                     # log print and tensorboard
-                    log_print("Epoch %d, Iteration %d, Loss: %.4f, pitch_Top10_Acc: %.4f, duration_ce_loss: %.4f, lr: %.6f, Time: %.2f" %
-                              (epoch, iters, loss.item(), pitch_acc.item(), duration_ce_loss.item(), cur_lr, train_time_per_step), logger)
-                    writer.add_scalar('train/loss', loss, iters)
-                    writer.add_scalar('train/pitch_loss', pitch_loss, iters)
-                    writer.add_scalar('train/duration_loss', duration_loss, iters)
-                    writer.add_scalar('train/pitch_acc', pitch_acc, iters)
-                    writer.add_scalar('train/duration_ce_loss', duration_ce_loss, iters)
+                    print("Epoch %d, Iteration %d, Gen Loss: %.4f, Disc Loss: %.4f, Mel Loss: %.4f, F0 Loss: %.4f, UV Loss: %.4f, CTC Loss: %.4f, S2S Loss: %.4f, SPK Loss: %.4f, Time: %.4f" % (
+                        epoch, iters, loss_gen_all.item(), loss_disc_all.item(), mel_loss.item(), f0_loss.item(), uv_loss.item(), ctc_loss.item(), s2s_loss.item(), spk_loss.item(), train_time_per_step))
                     writer.add_scalar('train/lr', cur_lr, iters)
                     writer.add_scalar('train/time', train_time_per_step, iters)
 
-                    writer.add_scalar('grad_norm/text_encoder', grad_norm_g, iters)
-                    writer.add_scalar('grad_norm/prosody_encoder', grad_norm_g2, iters)
-                    # writer.add_scalar('grad_norm/prosody_resampler', grad_norm_g3, iters)
-                    writer.add_scalar('grad_norm/p_bert_encoder', grad_norm_g4, iters)
+                    writer.add_scalar('grad_norm/fa_encoder', grad_norm_g, iters)
+                    writer.add_scalar('grad_norm/fa_decoder', grad_norm_g2, iters)
+                    writer.add_scalar('grad_norm/prosody_f0n_predictor', grad_norm_g3, iters)
+                    writer.add_scalar('grad_norm/content_f0n_predictor', grad_norm_g4, iters)
+                    writer.add_scalar('grad_norm/res_f0n_predictor', grad_norm_g5, iters)
+                    writer.add_scalar('grad_norm/content_phoneme_predictor', grad_norm_g6, iters)
+                    writer.add_scalar('grad_norm/prosody_phoneme_predictor', grad_norm_g7, iters)
+                    writer.add_scalar('grad_norm/res_phoneme_predictor', grad_norm_g8, iters)
+                    writer.add_scalar('grad_norm/timbre_predictor', grad_norm_g9, iters)
+                    writer.add_scalar('grad_norm/x_timbre_encoder', grad_norm_g10, iters)
+                    writer.add_scalar('grad_norm/x_timbre_predictor', grad_norm_g11, iters)
+
+                    writer.add_scalar('train/loss_gen_all', loss_gen_all.item(), iters)
+                    writer.add_scalar('train/loss_disc_all', loss_disc_all.item(), iters)
+                    writer.add_scalar('train/mel_loss', mel_loss.item(), iters)
+                    writer.add_scalar('train/f0_loss', f0_loss.item(), iters)
+                    writer.add_scalar('train/uv_loss', uv_loss.item(), iters)
+                    writer.add_scalar('train/ctc_loss', ctc_loss.item(), iters)
+                    writer.add_scalar('train/s2s_loss', s2s_loss.item(), iters)
+                    writer.add_scalar('train/spk_loss', spk_loss.item(), iters)
+
+                    writer.add_scalar('rev/c_f0_loss', c_f0_loss.item(), iters)
+                    writer.add_scalar('rev/c_uv_loss', c_uv_loss.item(), iters)
+                    writer.add_scalar('rev/r_f0_loss', r_f0_loss.item(), iters)
+                    writer.add_scalar('rev/r_uv_loss', r_uv_loss.item(), iters)
+                    writer.add_scalar('rev/p_ctc_loss', p_ctc_loss.item(), iters)
+                    writer.add_scalar('rev/p_s2s_loss', p_s2s_loss.item(), iters)
+                    writer.add_scalar('rev/r_ctc_loss', r_ctc_loss.item(), iters)
+                    writer.add_scalar('rev/r_s2s_loss', r_s2s_loss.item(), iters)
+                    writer.add_scalar('rev/x_spk_loss', x_spk_loss.item(), iters)
+
+                    writer.add_scalar('commit_loss/layer_0', commit_loss[0].item(), iters)
+                    writer.add_scalar('commit_loss/layer_1', commit_loss[1].item(), iters)
+                    writer.add_scalar('commit_loss/layer_2', commit_loss[2].item(), iters)
+                    writer.add_scalar('commit_loss/layer_3', commit_loss[3].item(), iters)
+                    writer.add_scalar('commit_loss/layer_4', commit_loss[4].item(), iters)
+                    writer.add_scalar('commit_loss/layer_5', commit_loss[5].item(), iters)
+
 
 
                     print('Time elasped:', time.time() - start_time)
             if iters % (log_interval * 10) == 0 and accelerator.is_main_process:
 
                 with torch.no_grad():
-                    # plot attention map
-                    attn_image = get_image(gt_attn.transpose(0, 1).cpu().numpy())
-                    writer.add_figure('train/attn', attn_image, iters)
-                    # plot predicted duration
-                    round_pred_dur = pred_dur.round().long()
-                    pred_aln_trg = torch.zeros(len(round_pred_dur), int(round_pred_dur.sum().data)).to(device)
-                    c_frame = 0
-                    for i in range(pred_aln_trg.size(0)):
-                        pred_aln_trg[i, c_frame:c_frame + int(round_pred_dur[i].data)] = 1
-                        c_frame += int(round_pred_dur[i].data)
-                    pred_attn_image = get_image(pred_aln_trg.cpu().numpy().squeeze())
-                    writer.add_figure('train/pred_attn', pred_attn_image, iters)
+                    # put predicted audio
+                    writer.add_audio('train/pred_audio', pred_wave[0], iters, sample_rate=16000)
 
-                    # plot predicted pitch curve
-                    # plot gt f0 curve to a image
-                    gt_f0s = gt_f0_codes
-                    pred_f0s = pred_pitch_codes
-                    fig1, ax1 = plt.subplots()
-                    ax1 = plt.plot(gt_f0s.cpu().numpy(), label='GT F0')
-                    writer.add_figure('train/f0', fig1, iters)
-                    fig2, ax2 = plt.subplots()
-                    ax2 = plt.plot(pred_f0s.cpu().numpy(), label='Pred F0')
-                    writer.add_figure('train/pred_f0', fig2, iters)
+                    # put ground truth audio
+                    writer.add_audio('train/gt_audio', wav_seg[0], iters, sample_rate=16000)
 
             if iters % save_interval == 0 and accelerator.is_main_process:
                 print('Saving..')
@@ -360,7 +430,7 @@ def main(args):
                     'iters': iters,
                     'epoch': epoch,
                 }
-                save_path = osp.join(log_dir, 'PLLMv2_epoch_%05d_step_%05d.pth' % (epoch, iters))
+                save_path = osp.join(log_dir, 'FAcodec_epoch_%05d_step_%05d.pth' % (epoch, iters))
                 torch.save(state, save_path)
             iters = iters + 1
             optimizer.scheduler(iters)

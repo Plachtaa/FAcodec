@@ -488,12 +488,9 @@ class FACodecDecoderV2(nn.Module):
         self.timbre_linear.bias.data[in_channels:] = 0
         self.timbre_norm = nn.LayerNorm(in_channels, elementwise_affine=False)
 
-        # self.f0_predictor = CNNLSTM(in_channels, 1, 2)
-        # self.phone_predictor = CNNLSTM(in_channels, 5003, 1)
-        # self.timbre_predictor = nn.Sequential(
-        #     CNNLSTM(in_channels, in_channels, 1, global_pred=True),
-        #     ArcMarginProduct(in_channels, 114514, s=30, m=0.5),
-        # )
+        self.f0_predictor = CNNLSTM(in_channels, 1, 2)
+        self.phone_predictor = CNNLSTM(in_channels, 5003, 1)
+        self.timbre_predictor = nn.Linear(in_channels, 114514)
 
         self.use_gr_content_f0 = use_gr_content_f0
         self.use_gr_prosody_phone = use_gr_prosody_phone
@@ -524,8 +521,7 @@ class FACodecDecoderV2(nn.Module):
         if self.use_gr_x_timbre:
             self.x_timbre_predictor = nn.Sequential(
                 GradientReversal(alpha=1),
-                CNNLSTM(in_channels, in_channels, 1, global_pred=True),
-                ArcMarginProduct(in_channels, 114514, s=30, m=0.5),
+                CNNLSTM(in_channels, 114514, 1, global_pred=True),
             )
 
         self.melspec_linear = nn.Linear(20, 256)
@@ -615,14 +611,14 @@ class FACodecDecoderV2(nn.Module):
         out = {}
 
         layer_0 = quantized[0]
-        # f0, uv = self.f0_predictor(layer_0)
-        # f0 = rearrange(f0, "... 1 -> ...")
-        # uv = rearrange(uv, "... 1 -> ...")
+        f0, uv = self.f0_predictor(layer_0)
+        f0 = rearrange(f0, "... 1 -> ...")
+        uv = rearrange(uv, "... 1 -> ...")
 
         layer_1 = quantized[1]
-        # (phone,) = self.phone_predictor(layer_1)
+        (phone,) = self.phone_predictor(layer_1)
 
-        # out = {"f0": f0, "uv": uv} #, "phone": phone}
+        out = {"f0": f0, "uv": uv} #, "phone": phone}
 
         if self.use_gr_prosody_phone:
             (prosody_phone,) = self.prosody_phone_predictor(layer_0)

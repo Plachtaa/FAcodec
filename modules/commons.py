@@ -4,7 +4,12 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from munch import Munch
+import json
 
+class AttrDict(dict):
+  def __init__(self, *args, **kwargs):
+    super(AttrDict, self).__init__(*args, **kwargs)
+    self.__dict__ = self
 
 def init_weights(m, mean=0.0, std=0.01):
   classname = m.__class__.__name__
@@ -191,7 +196,9 @@ def build_model(args):
   from .phoneme_predictor import PhonemePredictor
   from gradient_reversal import GradientReversal
   from .msstftd import MultiScaleSTFTDiscriminator
-  from .discriminators import MultiScaleDiscriminator, MultiPeriodDiscriminator
+  from .discriminators import MultiResolutionDiscriminator, MultiPeriodDiscriminator
+  json_config = json.loads(open("./configs/bigvgan_base_24khz.json").read())
+  h = AttrDict(json_config)
 
   fa_encoder = FACodecEncoderV2(
     ngf=32,
@@ -219,76 +226,76 @@ def build_model(args):
     use_gr_prosody_phone=False,
   )
 
-  content_phoneme_predictor = PhonemePredictor(
-    d_model=256,
-    nhead=4,
-    num_layers=6,
-    n_token=230,
-    n_lang=1,
-  )
+  # content_phoneme_predictor = PhonemePredictor(
+  #   d_model=256,
+  #   nhead=4,
+  #   num_layers=6,
+  #   n_token=230,
+  #   n_lang=1,
+  # )
+  #
+  # prosody_phoneme_predictor = nn.Sequential(
+  #   GradientReversal(alpha=1.0),
+  #   PhonemePredictor(
+  #     d_model=256,
+  #     nhead=4,
+  #     num_layers=6,
+  #     n_token=230,
+  #     n_lang=1,
+  #   )
+  # )
+  #
+  # res_phoneme_predictor = nn.Sequential(
+  #   GradientReversal(alpha=1.0),
+  #   PhonemePredictor(
+  #     d_model=256,
+  #     nhead=4,
+  #     num_layers=6,
+  #     n_token=230,
+  #     n_lang=1,
+  #   )
+  # )
+  #
+  # prosody_f0n_predictor = CNNLSTM(indim=256, outdim=1, head=2)
+  #
+  # content_f0n_predictor = nn.Sequential(
+  #   GradientReversal(alpha=1.0),
+  #   CNNLSTM(indim=256, outdim=1, head=2)
+  # )
+  #
+  # res_f0n_predictor = nn.Sequential(
+  #   GradientReversal(alpha=1.0),
+  #   CNNLSTM(indim=256, outdim=1, head=2)
+  # )
+  #
+  # timbre_predictor = ArcMarginProduct(256, 114514, s=30, m=0.5)
+  #
+  # x_timbre_encoder = nn.Sequential(
+  #   GradientReversal(alpha=1),
+  #   CNNLSTM(256, 256, 1, global_pred=True),
+  # )
+  #
+  # x_timbre_predictor = ArcMarginProduct(256, 114514, s=30, m=0.5)
 
-  prosody_phoneme_predictor = nn.Sequential(
-    GradientReversal(alpha=1.0),
-    PhonemePredictor(
-      d_model=256,
-      nhead=4,
-      num_layers=6,
-      n_token=230,
-      n_lang=1,
-    )
-  )
-
-  res_phoneme_predictor = nn.Sequential(
-    GradientReversal(alpha=1.0),
-    PhonemePredictor(
-      d_model=256,
-      nhead=4,
-      num_layers=6,
-      n_token=230,
-      n_lang=1,
-    )
-  )
-
-  prosody_f0n_predictor = CNNLSTM(indim=256, outdim=1, head=2)
-
-  content_f0n_predictor = nn.Sequential(
-    GradientReversal(alpha=1.0),
-    CNNLSTM(indim=256, outdim=1, head=2)
-  )
-
-  res_f0n_predictor = nn.Sequential(
-    GradientReversal(alpha=1.0),
-    CNNLSTM(indim=256, outdim=1, head=2)
-  )
-
-  timbre_predictor = ArcMarginProduct(256, 114514, s=30, m=0.5)
-
-  x_timbre_encoder = nn.Sequential(
-    GradientReversal(alpha=1),
-    CNNLSTM(256, 256, 1, global_pred=True),
-  )
-
-  x_timbre_predictor = ArcMarginProduct(256, 114514, s=30, m=0.5)
-
-  msd = MultiScaleDiscriminator()
-  mpd = MultiPeriodDiscriminator()
-  stft_disc = MultiScaleSTFTDiscriminator(filters=32)
+  mrd = MultiResolutionDiscriminator(h)
+  mpd = MultiPeriodDiscriminator(h)
+  # stft_disc = MultiScaleSTFTDiscriminator(filters=32)
 
   nets = Munch(
     fa_encoder=fa_encoder,
     fa_decoder=fa_decoder,
-    content_phoneme_predictor=content_phoneme_predictor,
-    prosody_phoneme_predictor=prosody_phoneme_predictor,
-    res_phoneme_predictor=res_phoneme_predictor,
-    prosody_f0n_predictor=prosody_f0n_predictor,
-    content_f0n_predictor=content_f0n_predictor,
-    res_f0n_predictor=res_f0n_predictor,
-    timbre_predictor=timbre_predictor,
-    x_timbre_encoder=x_timbre_encoder,
-    x_timbre_predictor=x_timbre_predictor,
-    msd=msd,
+    # content_phoneme_predictor=content_phoneme_predictor,
+    # prosody_phoneme_predictor=prosody_phoneme_predictor,
+    # res_phoneme_predictor=res_phoneme_predictor,
+    # prosody_f0n_predictor=prosody_f0n_predictor,
+    # content_f0n_predictor=content_f0n_predictor,
+    # res_f0n_predictor=res_f0n_predictor,
+    # timbre_predictor=timbre_predictor,
+    # x_timbre_encoder=x_timbre_encoder,
+    # x_timbre_predictor=x_timbre_predictor,
+    mrd=mrd,
     mpd=mpd,
-    stft_disc=stft_disc,
+    # stft_disc=stft_disc,
   )
 
   return nets
