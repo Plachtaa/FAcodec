@@ -155,7 +155,7 @@ class FilePathDataset(torch.utils.data.Dataset):
 
         _data_list = [l[:-1].split('\t') if "\t" in l else l[:-1].split('|') for l in data_list]
 
-        self.data_list = _data_list
+        self.data_list = [d for d in _data_list if len(d) == 5]
         self.text_cleaner = TextCleaner()
         self.sr = sr
 

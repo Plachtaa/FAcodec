@@ -489,7 +489,7 @@ class FACodecDecoderV2(nn.Module):
         self.timbre_norm = nn.LayerNorm(in_channels, elementwise_affine=False)
 
         self.f0_predictor = CNNLSTM(in_channels, 1, 2)
-        self.phone_predictor = CNNLSTM(in_channels, 5003, 1)
+        self.phone_predictor = CNNLSTM(in_channels, 1024, 1)
         self.timbre_predictor = nn.Linear(in_channels, 114514)
 
         self.use_gr_content_f0 = use_gr_content_f0
@@ -505,7 +505,7 @@ class FACodecDecoderV2(nn.Module):
 
         if self.vq_num_q_r > 0 and self.use_gr_residual_phone > 0:
             self.res_phone_predictor = nn.Sequential(
-                GradientReversal(alpha=1.0), CNNLSTM(in_channels, 5003, 1)
+                GradientReversal(alpha=1.0), CNNLSTM(in_channels, 1024, 1)
             )
 
         if self.use_gr_content_f0:
@@ -515,7 +515,7 @@ class FACodecDecoderV2(nn.Module):
 
         if self.use_gr_prosody_phone:
             self.prosody_phone_predictor = nn.Sequential(
-                GradientReversal(alpha=1.0), CNNLSTM(in_channels, 5003, 1)
+                GradientReversal(alpha=1.0), CNNLSTM(in_channels, 1024, 1)
             )
 
         if self.use_gr_x_timbre:
@@ -591,6 +591,7 @@ class FACodecDecoderV2(nn.Module):
         speaker_embedding=None,
         n_quantizers=None,
         quantized=None,
+        quantized_segment=None,
     ):
         if get_vq:
             return self.quantizer.get_emb()
@@ -618,7 +619,7 @@ class FACodecDecoderV2(nn.Module):
         layer_1 = quantized[1]
         (phone,) = self.phone_predictor(layer_1)
 
-        out = {"f0": f0, "uv": uv} #, "phone": phone}
+        out = {"f0": f0, "uv": uv, "phone": phone}
 
         if self.use_gr_prosody_phone:
             (prosody_phone,) = self.prosody_phone_predictor(layer_0)
@@ -680,6 +681,41 @@ class FACodecDecoderV2(nn.Module):
         if self.use_gr_x_timbre:
             (x_timbre,) = self.x_timbre_predictor(x)
             out["x_timbre"] = x_timbre
+        pred_timbre = self.timbre_predictor(speaker_embedding)
+        out["timbre"] = pred_timbre
+
+        # change x to be segment
+        if self.vq_num_q_r > 0:
+            if self.use_random_mask_residual:
+                bsz = quantized_segment[2].shape[0]
+                res_mask = np.random.choice(
+                    [0, 1],
+                    size=bsz,
+                    p=[
+                        self.prob_random_mask_residual,
+                        1 - self.prob_random_mask_residual,
+                    ],
+                )
+                res_mask = (
+                    torch.from_numpy(res_mask).unsqueeze(1).unsqueeze(1)
+                )  # (B, 1, 1)
+                res_mask = res_mask.to(
+                    device=quantized_segment[2].device, dtype=quantized_segment[2].dtype
+                )
+                x = (
+                    quantized_segment[0].detach()
+                    + quantized_segment[1].detach()
+                    + quantized_segment[2] * res_mask
+                )
+                # x = quantized_perturbe[0].detach() + quantized[1].detach() + quantized[2] * res_mask
+            else:
+                # x = quantized_segment[0].detach() + quantized_segment[1].detach() + quantized_segment[2]
+                x = quantized_segment[0] + quantized_segment[1] + quantized_segment[2]
+                # x = quantized_perturbe[0].detach() + quantized[1].detach() + quantized[2]
+        else:
+            # x = quantized_segment[0].detach() + quantized_segment[1].detach()
+            x = quantized_segment[0] + quantized_segment[1]
+            # x = quantized_perturbe[0].detach() + quantized[1].detach()
 
         x = x.transpose(1, 2)
         x = self.timbre_norm(x)

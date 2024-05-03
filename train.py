@@ -24,9 +24,11 @@ from accelerate import DistributedDataParallelKwargs
 
 from torch.utils.tensorboard import SummaryWriter
 import torchaudio
+from torchmetrics.classification import MulticlassAccuracy
 
 import logging
 from accelerate.logging import get_logger
+from speechtokenizer import SpeechTokenizer
 
 
 logger = get_logger(__name__, log_level="DEBUG")
@@ -86,9 +88,15 @@ def main(args):
     with accelerator.main_process_first():
         pitch_extractor = load_F0_models(config['F0_path']).to(device)
 
+        # load pretrained audio codec
+        w2v_config_path = './w2v_models/speechtokenizer_hubert_avg_config.json'
+        w2v_ckpt_path = './w2v_models/SpeechTokenizer.pt'
+        w2v_model = SpeechTokenizer.load_from_checkpoint(w2v_config_path, w2v_ckpt_path).to(device)
+        w2v_model.eval()
+
     scheduler_params = {
         "warmup_steps": 200,
-        "base_lr": 0.0002,
+        "base_lr": 0.0001,
     }
 
     model_params = recursive_munch(config['model_params'])
@@ -116,14 +124,20 @@ def main(args):
             start_epoch = 0
             iters = 0
 
-    blank_index = train_dataloader.dataset.text_cleaner.word_index_dictionary[" "]  # get blank index
-    phn_criterion = {
-        "ce": nn.CrossEntropyLoss(ignore_index=-1),
-        "ctc": torch.nn.CTCLoss(blank=blank_index, zero_infinity=True),
-    }
+    # blank_index = train_dataloader.dataset.text_cleaner.word_index_dictionary[" "]  # get blank index
+    # phn_criterion = {
+    #     "ce": nn.CrossEntropyLoss(ignore_index=-1),
+    #     "ctc": torch.nn.CTCLoss(blank=blank_index, zero_infinity=True),
+    # }
     spk_criterion = FocalLoss(gamma=2).to(device)
 
     train_dataloader = accelerator.prepare(train_dataloader)
+
+    content_metric = MulticlassAccuracy(
+            top_k=10,
+            num_classes=1024,
+            ignore_index=-1,
+        ).to(device)
 
 
     for epoch in range(start_epoch, epochs):
@@ -185,55 +199,50 @@ def main(args):
                 # F0_real = F0_real.unsqueeze(0) if batch_size == 1 else F0_real
 
 
-            out = model.fa_decoder(None, None, eval_vq=False, vq=False, quantized=en, speaker_embedding=spk_embs)
-            pred_wave = out['audio']
+            out = model.fa_decoder(None, None, eval_vq=False, vq=False, quantized=quantized, speaker_embedding=spk_embs, quantized_segment=en)
 
             # generator loss
+            pred_wave = out['audio']
             wav_seg = wav_seg.unsqueeze(1)
-            if iters >= discriminator_iter_start:
-                optimizer.zero_grad("mrd")
-                optimizer.zero_grad("mpd")
-                # MPD
-                y_df_hat_r, y_df_hat_g, _, _ = model.mpd(wav_seg, pred_wave.detach())
-                loss_disc_f, losses_disc_f_r, losses_disc_f_g = discriminator_loss(y_df_hat_r, y_df_hat_g)
+            y_disc_r, fmap_r = model.stft_disc(wav_seg.contiguous())
+            y_disc_gen, fmap_gen = model.stft_disc(pred_wave.contiguous())
+            y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = model.mpd(
+                wav_seg.contiguous(), pred_wave.contiguous())
+            y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = model.msd(
+                wav_seg.contiguous(), pred_wave.contiguous())
+            # for decoder reconstruction
+            wav_tot_loss, rec_loss, adv_loss, feat_loss_tot, d_weight = loss_g(
+                commit_loss,
+                wav_seg,
+                pred_wave,
+                fmap_r,
+                fmap_gen,
+                y_disc_r,
+                y_disc_gen,
+                iters,
+                y_df_hat_r,
+                y_df_hat_g,
+                y_ds_hat_r,
+                y_ds_hat_g,
+                fmap_f_r,
+                fmap_f_g,
+                fmap_s_r,
+                fmap_s_g,
+            )
 
-                # MSD
-                y_ds_hat_r, y_ds_hat_g, _, _ = model.mrd(wav_seg, pred_wave.detach())
-                loss_disc_s, losses_disc_s_r, losses_disc_s_g = discriminator_loss(y_ds_hat_r, y_ds_hat_g)
+            # extract content with w2v model
+            target_content_tokens = torch.zeros((len(waves), enc_out.size(-1))).to(device).long() - 1
+            for bib in range(len(waves)):
+                wave_tensor = torch.FloatTensor(waves[bib]).to(device)[None, None, :]
+                with torch.no_grad():
+                    RVQ_1 = w2v_model.encode(wave_tensor.to(device), n_q=1)
+                RVQ_1 = F.interpolate(RVQ_1.float(), mel_input_length[bib], mode='nearest')
+                target_content_tokens[bib, :mel_input_length[bib]] = RVQ_1.squeeze().long()
 
-                loss_disc_all = loss_disc_s + loss_disc_f
-                accelerator.backward(loss_disc_all)
-                optimizer.step("mrd")
-                optimizer.step("mpd")
-
-                optimizer.zero_grad("mrd")
-                optimizer.zero_grad("mpd")
-            else:
-                loss_disc_all = torch.FloatTensor([0]).to(device)
-                grad_norm_mpd = 0.
-                grad_norm_mrd = 0.
-
-
-            y_g_hat_mel = mel_spectrogram(pred_wave.squeeze(1), n_fft=1024, num_mels=80, sampling_rate=16000,
-                                        hop_size=200,
-                                        win_size=800,
-                                        fmin=0,
-                                        fmax=8000,
-                                     )
-            gt_mel = mel_spectrogram(wav_seg.squeeze(1), n_fft=1024, num_mels=80, sampling_rate=16000,
-                                        hop_size=200,
-                                        win_size=800,
-                                        fmin=0,
-                                        fmax=8000,
-                                     )
-            mel_loss = F.l1_loss(y_g_hat_mel, gt_mel)
             # for f0 and energy prediction
-            prosody_latent = quantized[0]
-            content_latent = quantized[1]
-            res_latent = quantized[2]
-            pred_f0, pred_uv = model.prosody_f0n_predictor(prosody_latent)
-            c_pred_f0, c_pred_uv = model.content_f0n_predictor(content_latent)
-            r_pred_f0, r_pred_uv = model.res_f0n_predictor(res_latent)
+            pred_f0, pred_uv = out['f0'], out['uv']
+            c_pred_f0, c_pred_uv = out['content_f0'], out['content_uv']
+            r_pred_f0, r_pred_uv = out['res_f0'], out['res_uv']
             f0_loss, uv_loss, c_f0_loss, c_uv_loss, r_f0_loss, r_uv_loss = 0, 0, 0, 0, 0, 0
             for bib, mel_len in enumerate(mel_input_length):
                 f0_loss += F.smooth_l1_loss(F0_real[bib, :mel_len], pred_f0[bib, :mel_len].squeeze(-1))
@@ -248,114 +257,66 @@ def main(args):
 
             tot_f0_loss, tot_uv_loss = (f0_loss + c_f0_loss + r_f0_loss)/3, (uv_loss + c_uv_loss + r_uv_loss)/3
 
-            # for phoneme prediction
-
-            ppgs, s2s_pred, s2s_attn = model.content_phoneme_predictor(content_latent, texts, langs,
-                                                                       mel_lens=mel_input_length, text_lens=input_lengths)
-            ctc_loss = phn_criterion['ctc'](ppgs.log_softmax(dim=2).transpose(0, 1), texts, mel_input_length, input_lengths)
-            s2s_loss = 0
-            for _s2s_pred, _text_input, _text_length in zip(s2s_pred, texts, input_lengths):
-                s2s_loss += phn_criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
-            s2s_loss /= texts.size(0)
-
-            if accelerator.num_processes == 1:
-                p_ppgs, p_s2s_pred, p_s2s_attn = model.prosody_phoneme_predictor[1](model.prosody_phoneme_predictor[0](prosody_latent),
-                                                        texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
-            else:
-                p_ppgs, p_s2s_pred, p_s2s_attn = model.prosody_phoneme_predictor.module[1](model.prosody_phoneme_predictor.module[0](prosody_latent),
-                                                        texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
-            p_ctc_loss = phn_criterion['ctc'](p_ppgs.log_softmax(dim=2).transpose(0, 1), texts, mel_input_length, input_lengths)
-            p_s2s_loss = 0
-            for _s2s_pred, _text_input, _text_length in zip(p_s2s_pred, texts, input_lengths):
-                p_s2s_loss += phn_criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
-            p_s2s_loss /= texts.size(0)
-
-            if accelerator.num_processes == 1:
-                r_ppgs, r_s2s_pred, r_s2s_attn = model.res_phoneme_predictor[1](model.res_phoneme_predictor[0](res_latent),
-                                                        texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
-            else:
-                r_ppgs, r_s2s_pred, r_s2s_attn = model.res_phoneme_predictor.module[1](model.res_phoneme_predictor.module[0](res_latent),
-                                                        texts, langs, mel_lens=mel_input_length, text_lens=input_lengths)
-            r_ctc_loss = phn_criterion['ctc'](r_ppgs.log_softmax(dim=2).transpose(0, 1), texts, mel_input_length, input_lengths)
-            r_s2s_loss = 0
-            for _s2s_pred, _text_input, _text_length in zip(r_s2s_pred, texts, input_lengths):
-                r_s2s_loss += phn_criterion['ce'](_s2s_pred[:_text_length], _text_input[:_text_length])
-            r_s2s_loss /= texts.size(0)
-
-            tot_ctc_loss = (ctc_loss + p_ctc_loss + r_ctc_loss)/3
-            tot_s2s_loss = (s2s_loss + p_s2s_loss + r_s2s_loss)/3
-
-            # speaker prediction loss
-            spk_pred_logits = model.timbre_predictor(spk_embs, speaker_labels)
-            bsz = quantized[2].shape[0]
-            res_mask = np.random.choice(
-                [0, 1],
-                size=bsz,
-                p=[
-                    0.75,
-                    1 - 0.75,
-                ],
-            )
-            res_mask = (
-                torch.from_numpy(res_mask).unsqueeze(1).unsqueeze(1)
-            )  # (B, 1, 1)
-            res_mask = res_mask.to(
-                device=quantized[2].device, dtype=quantized[2].dtype
-            )
-            x = (
-                    quantized[0].detach()
-                    + quantized[1].detach()
-                    + quantized[2] * res_mask
-            )
-            x_spk_embs = model.x_timbre_encoder(x)[0]
-            x_spk_pred_logits = model.x_timbre_predictor(x_spk_embs, speaker_labels)
-
+            spk_pred_logits = out['timbre']
+            x_spk_pred_logits = out['x_timbre']
             spk_loss = spk_criterion(spk_pred_logits, speaker_labels)
             x_spk_loss = spk_criterion(x_spk_pred_logits, speaker_labels)
 
+            pred_content = out['phone']
+            p_pred_content = out['prosody_phone']
+            r_pred_content = out['res_phone']
+
+            content_loss = F.cross_entropy(pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1)
+            p_content_loss = F.cross_entropy(p_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1)
+            # p_content_loss = 0
+            r_content_loss = F.cross_entropy(r_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1)
+
+            tot_content_loss = (content_loss + p_content_loss + r_content_loss)/3
+
+            content_top10_acc = content_metric(pred_content.transpose(1, 2), target_content_tokens)
+            p_content_top10_acc = content_metric(p_pred_content.transpose(1, 2), target_content_tokens)
+            # p_content_top10_acc = 0
+            r_content_top10_acc = content_metric(r_pred_content.transpose(1, 2), target_content_tokens)
+
             tot_spk_loss = (spk_loss + x_spk_loss)/2
 
-            if iters >= discriminator_iter_start:
-                # MPD loss
-                y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = model.mpd(wav_seg, pred_wave)
-                loss_fm_f = feature_loss(fmap_f_r, fmap_f_g)
-                loss_gen_f, losses_gen_f = generator_loss(y_df_hat_g)
+            loss_gen_all = wav_tot_loss + content_loss + f0_loss + uv_loss + spk_loss
+            # tot_f0_loss * 3 + tot_uv_loss * 3 + tot_content_loss * 3 + tot_spk_loss * 2
+            #  + content_loss + f0_loss + uv_loss + spk_loss # +\
 
-                # MRD loss
-                y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = model.mrd(wav_seg, pred_wave)
-                loss_fm_s = feature_loss(fmap_s_r, fmap_s_g)
-                loss_gen_s, losses_gen_s = generator_loss(y_ds_hat_g)
-                loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + mel_loss * 5 \
-                + tot_f0_loss * 1 + tot_uv_loss * 1 + tot_ctc_loss * 1 + tot_s2s_loss * 1 + tot_spk_loss * 1 + commit_loss.sum() * 0.15
-            else:
-                loss_gen_all = mel_loss * 5 \
-                + tot_f0_loss * 1 + tot_uv_loss * 1 + tot_ctc_loss * 1 + tot_s2s_loss * 1 + tot_spk_loss * 1 + commit_loss.sum() * 0.15
 
             optimizer.zero_grad()
             accelerator.backward(loss_gen_all)
             grad_norm_g = torch.nn.utils.clip_grad_norm_(model.fa_encoder.parameters(), 1000.0)
             grad_norm_g2 = torch.nn.utils.clip_grad_norm_(model.fa_decoder.parameters(), 1000.0)
-            grad_norm_g3 = torch.nn.utils.clip_grad_norm_(model.prosody_f0n_predictor.parameters(), 1000.0)
-            grad_norm_g4 = torch.nn.utils.clip_grad_norm_(model.content_f0n_predictor.parameters(), 1000.0)
-            grad_norm_g5 = torch.nn.utils.clip_grad_norm_(model.res_f0n_predictor.parameters(), 1000.0)
-            grad_norm_g6 = torch.nn.utils.clip_grad_norm_(model.content_phoneme_predictor.parameters(), 1000.0)
-            grad_norm_g7 = torch.nn.utils.clip_grad_norm_(model.prosody_phoneme_predictor.parameters(), 1000.0)
-            grad_norm_g8 = torch.nn.utils.clip_grad_norm_(model.res_phoneme_predictor.parameters(), 1000.0)
-            grad_norm_g9 = torch.nn.utils.clip_grad_norm_(model.timbre_predictor.parameters(), 1000.0)
-            grad_norm_g10 = torch.nn.utils.clip_grad_norm_(model.x_timbre_encoder.parameters(), 1000.0)
-            grad_norm_g11 = torch.nn.utils.clip_grad_norm_(model.x_timbre_predictor.parameters(), 1000.0)
 
             optimizer.step('fa_encoder')
             optimizer.step('fa_decoder')
-            optimizer.step('prosody_f0n_predictor')
-            optimizer.step('content_f0n_predictor')
-            optimizer.step('res_f0n_predictor')
-            optimizer.step('content_phoneme_predictor')
-            optimizer.step('prosody_phoneme_predictor')
-            optimizer.step('res_phoneme_predictor')
-            optimizer.step('timbre_predictor')
-            optimizer.step('x_timbre_encoder')
-            optimizer.step('x_timbre_predictor')
+
+
+            # update discriminator
+            y_disc_r_det, fmap_r_det = model.stft_disc(wav_seg.detach())
+            y_disc_gen_det, fmap_gen_det = model.stft_disc(pred_wave.detach())
+
+            # MPD
+            y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = model.mpd(
+                wav_seg.detach(), pred_wave.detach())
+            # MSD
+            y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = model.msd(
+                wav_seg.detach(), pred_wave.detach())
+
+            loss_d = loss_dis(
+                y_disc_r_det, y_disc_gen_det, fmap_r_det, fmap_gen_det,
+                y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g, y_ds_hat_r,
+                y_ds_hat_g, fmap_s_r, fmap_s_g, iters)
+
+            accelerator.backward(loss_d)
+            grad_norm_d = torch.nn.utils.clip_grad_norm_(model.stft_disc.parameters(), 1000.0)
+            grad_norm_d2 = torch.nn.utils.clip_grad_norm_(model.mpd.parameters(), 1000.0)
+            grad_norm_d3 = torch.nn.utils.clip_grad_norm_(model.msd.parameters(), 1000.0)
+            optimizer.step('stft_disc')
+            optimizer.step('mpd')
+            optimizer.step('msd')
 
 
             # optimizer.step()
@@ -366,41 +327,35 @@ def main(args):
                 with torch.no_grad():
                     cur_lr = optimizer.schedulers['fa_encoder'].get_last_lr()[0] if i != 0 else 0
                     # log print and tensorboard
-                    print("Epoch %d, Iteration %d, Gen Loss: %.4f, Disc Loss: %.4f, Mel Loss: %.4f, F0 Loss: %.4f, UV Loss: %.4f, CTC Loss: %.4f, S2S Loss: %.4f, SPK Loss: %.4f, Time: %.4f" % (
-                        epoch, iters, loss_gen_all.item(), loss_disc_all.item(), mel_loss.item(), f0_loss.item(), uv_loss.item(), ctc_loss.item(), s2s_loss.item(), spk_loss.item(), train_time_per_step))
+                    print("Epoch %d, Iteration %d, Gen Loss: %.4f, Disc Loss: %.4f, wav Loss: %.4f, F0 Loss: %.4f, UV Loss: %.4f, W2V Loss: %.4f, SPK Loss: %.4f, Time: %.4f" % (
+                        epoch, iters, loss_gen_all.item(), loss_d.item(), wav_tot_loss.item(), f0_loss.item(), uv_loss.item(), content_loss.item(), spk_loss.item(), train_time_per_step))
                     writer.add_scalar('train/lr', cur_lr, iters)
                     writer.add_scalar('train/time', train_time_per_step, iters)
 
                     writer.add_scalar('grad_norm/fa_encoder', grad_norm_g, iters)
                     writer.add_scalar('grad_norm/fa_decoder', grad_norm_g2, iters)
-                    writer.add_scalar('grad_norm/prosody_f0n_predictor', grad_norm_g3, iters)
-                    writer.add_scalar('grad_norm/content_f0n_predictor', grad_norm_g4, iters)
-                    writer.add_scalar('grad_norm/res_f0n_predictor', grad_norm_g5, iters)
-                    writer.add_scalar('grad_norm/content_phoneme_predictor', grad_norm_g6, iters)
-                    writer.add_scalar('grad_norm/prosody_phoneme_predictor', grad_norm_g7, iters)
-                    writer.add_scalar('grad_norm/res_phoneme_predictor', grad_norm_g8, iters)
-                    writer.add_scalar('grad_norm/timbre_predictor', grad_norm_g9, iters)
-                    writer.add_scalar('grad_norm/x_timbre_encoder', grad_norm_g10, iters)
-                    writer.add_scalar('grad_norm/x_timbre_predictor', grad_norm_g11, iters)
 
                     writer.add_scalar('train/loss_gen_all', loss_gen_all.item(), iters)
-                    writer.add_scalar('train/loss_disc_all', loss_disc_all.item(), iters)
-                    writer.add_scalar('train/mel_loss', mel_loss.item(), iters)
+                    writer.add_scalar('train/loss_disc_all', loss_d.item(), iters)
+                    writer.add_scalar('train/wav_loss', wav_tot_loss.item(), iters)
+                    writer.add_scalar('train/rec_loss', rec_loss.item(), iters)
+                    writer.add_scalar('train/adv_loss', adv_loss.item(), iters)
+                    writer.add_scalar('train/feat_loss', feat_loss_tot.item(), iters)
                     writer.add_scalar('train/f0_loss', f0_loss.item(), iters)
                     writer.add_scalar('train/uv_loss', uv_loss.item(), iters)
-                    writer.add_scalar('train/ctc_loss', ctc_loss.item(), iters)
-                    writer.add_scalar('train/s2s_loss', s2s_loss.item(), iters)
+                    writer.add_scalar('train/content_loss', content_loss.item(), iters)
                     writer.add_scalar('train/spk_loss', spk_loss.item(), iters)
+                    writer.add_scalar('train/content_top10_acc', content_top10_acc.item(), iters)
 
-                    writer.add_scalar('rev/c_f0_loss', c_f0_loss.item(), iters)
-                    writer.add_scalar('rev/c_uv_loss', c_uv_loss.item(), iters)
+                    # writer.add_scalar('rev/c_f0_loss', c_f0_loss.item(), iters)
+                    # writer.add_scalar('rev/c_uv_loss', c_uv_loss.item(), iters)
                     writer.add_scalar('rev/r_f0_loss', r_f0_loss.item(), iters)
                     writer.add_scalar('rev/r_uv_loss', r_uv_loss.item(), iters)
-                    writer.add_scalar('rev/p_ctc_loss', p_ctc_loss.item(), iters)
-                    writer.add_scalar('rev/p_s2s_loss', p_s2s_loss.item(), iters)
-                    writer.add_scalar('rev/r_ctc_loss', r_ctc_loss.item(), iters)
-                    writer.add_scalar('rev/r_s2s_loss', r_s2s_loss.item(), iters)
+                    # writer.add_scalar('rev/p_content_loss', p_content_loss.item(), iters)
+                    writer.add_scalar('rev/r_content_loss', r_content_loss.item(), iters)
                     writer.add_scalar('rev/x_spk_loss', x_spk_loss.item(), iters)
+                    writer.add_scalar('rev/r_content_top10_acc', r_content_top10_acc.item(), iters)
+                    # writer.add_scalar('rev/p_content_top10_acc', p_content_top10_acc.item(), iters)
 
                     writer.add_scalar('commit_loss/layer_0', commit_loss[0].item(), iters)
                     writer.add_scalar('commit_loss/layer_1', commit_loss[1].item(), iters)
@@ -433,8 +388,11 @@ def main(args):
                 save_path = osp.join(log_dir, 'FAcodec_epoch_%05d_step_%05d.pth' % (epoch, iters))
                 torch.save(state, save_path)
             iters = iters + 1
-            optimizer.scheduler(iters)
-            accelerator.wait_for_everyone()
+        optimizer.scheduler(key='fa_encoder')
+        optimizer.scheduler(key='fa_decoder')
+        optimizer.scheduler(key='stft_disc')
+        optimizer.scheduler(key='mpd')
+        optimizer.scheduler(key='msd')
         accelerator.wait_for_everyone()
 
 

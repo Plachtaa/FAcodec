@@ -61,7 +61,7 @@ LAMBDA_ADV = 1
 LAMBDA_REC = 1
 LAMBDA_COM = 1000
 LAMBDA_FEAT = 1
-discriminator_iter_start = 2000
+discriminator_iter_start = 500
 def reconstruction_loss(x, G_x, eps=1e-7):
     # NOTE (lsx): hard-coded now
     L = LAMBDA_WAV * F.mse_loss(x, G_x)  # wav L1 loss
@@ -225,9 +225,9 @@ def loss_g(codebook_loss,
 
 def loss_dis(y_disc_r_det, y_disc_gen_det, fmap_r_det, fmap_gen_det, y_df_hat_r,
              y_df_hat_g, fmap_f_r, fmap_f_g, y_ds_hat_r, y_ds_hat_g, fmap_s_r,
-             fmap_s_g, global_step, args):
+             fmap_s_g, global_step):
     disc_factor = adopt_weight(
-        args.LAMBDA_ADV, global_step, threshold=args.discriminator_iter_start)
+        LAMBDA_ADV, global_step, threshold=discriminator_iter_start)
     d_loss = disc_factor * criterion_d(y_disc_r_det, y_disc_gen_det, fmap_r_det,
                                        fmap_gen_det, y_df_hat_r, y_df_hat_g,
                                        fmap_f_r, fmap_f_g, y_ds_hat_r,

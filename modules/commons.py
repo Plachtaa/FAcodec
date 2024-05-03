@@ -196,7 +196,7 @@ def build_model(args):
   from .phoneme_predictor import PhonemePredictor
   from gradient_reversal import GradientReversal
   from .msstftd import MultiScaleSTFTDiscriminator
-  from .discriminators import MultiResolutionDiscriminator, MultiPeriodDiscriminator
+  from .discriminators import MultiScaleDiscriminator, MultiPeriodDiscriminator
   json_config = json.loads(open("./configs/bigvgan_base_24khz.json").read())
   h = AttrDict(json_config)
 
@@ -219,67 +219,19 @@ def build_model(args):
     codebook_size_prosody=10,
     codebook_size_content=10,
     codebook_size_residual=10,
-    use_gr_x_timbre=False,
-    use_gr_residual_f0=False,
-    use_gr_residual_phone=False,
-    use_gr_content_f0=False,
-    use_gr_prosody_phone=False,
+    use_gr_x_timbre=True,
+    use_gr_residual_f0=True,
+    use_gr_residual_phone=True,
+    use_random_mask_residual=True,
+    use_gr_content_f0=True,
+    use_gr_prosody_phone=True,
   )
 
-  # content_phoneme_predictor = PhonemePredictor(
-  #   d_model=256,
-  #   nhead=4,
-  #   num_layers=6,
-  #   n_token=230,
-  #   n_lang=1,
-  # )
-  #
-  # prosody_phoneme_predictor = nn.Sequential(
-  #   GradientReversal(alpha=1.0),
-  #   PhonemePredictor(
-  #     d_model=256,
-  #     nhead=4,
-  #     num_layers=6,
-  #     n_token=230,
-  #     n_lang=1,
-  #   )
-  # )
-  #
-  # res_phoneme_predictor = nn.Sequential(
-  #   GradientReversal(alpha=1.0),
-  #   PhonemePredictor(
-  #     d_model=256,
-  #     nhead=4,
-  #     num_layers=6,
-  #     n_token=230,
-  #     n_lang=1,
-  #   )
-  # )
-  #
-  # prosody_f0n_predictor = CNNLSTM(indim=256, outdim=1, head=2)
-  #
-  # content_f0n_predictor = nn.Sequential(
-  #   GradientReversal(alpha=1.0),
-  #   CNNLSTM(indim=256, outdim=1, head=2)
-  # )
-  #
-  # res_f0n_predictor = nn.Sequential(
-  #   GradientReversal(alpha=1.0),
-  #   CNNLSTM(indim=256, outdim=1, head=2)
-  # )
-  #
-  # timbre_predictor = ArcMarginProduct(256, 114514, s=30, m=0.5)
-  #
-  # x_timbre_encoder = nn.Sequential(
-  #   GradientReversal(alpha=1),
-  #   CNNLSTM(256, 256, 1, global_pred=True),
-  # )
-  #
-  # x_timbre_predictor = ArcMarginProduct(256, 114514, s=30, m=0.5)
+  # content_phoneme_pr
 
-  mrd = MultiResolutionDiscriminator(h)
-  mpd = MultiPeriodDiscriminator(h)
-  # stft_disc = MultiScaleSTFTDiscriminator(filters=32)
+  msd = MultiScaleDiscriminator()
+  mpd = MultiPeriodDiscriminator()
+  stft_disc = MultiScaleSTFTDiscriminator(filters=32)
 
   nets = Munch(
     fa_encoder=fa_encoder,
@@ -293,27 +245,35 @@ def build_model(args):
     # timbre_predictor=timbre_predictor,
     # x_timbre_encoder=x_timbre_encoder,
     # x_timbre_predictor=x_timbre_predictor,
-    mrd=mrd,
+    msd=msd,
     mpd=mpd,
-    # stft_disc=stft_disc,
+    stft_disc=stft_disc,
   )
 
   return nets
 
 
-def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[]):
+def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[], is_distributed=False):
   state = torch.load(path, map_location='cpu')
   params = state['net']
   for key in model:
     if key in params and key not in ignore_modules:
+      if not is_distributed:
+        # strip prefix of DDP (module.), create a new OrderedDict that does not contain the prefix
+        for k in list(params[key].keys()):
+          if k.startswith('module.'):
+            params[key][k[len("module."):]] = params[key][k]
+            del params[key][k]
       print('%s loaded' % key)
-      model[key].load_state_dict(params[key], strict=True)
+      model[key].load_state_dict(params[key], strict=False)
   _ = [model[key].eval() for key in model]
 
   if not load_only_params:
     epoch = state["epoch"] + 1
     iters = state["iters"]
     optimizer.load_state_dict(state["optimizer"])
+    optimizer.load_scheduler_state_dict(state["scheduler"])
+
   else:
     epoch = state["epoch"] + 1
     iters = state["iters"]
