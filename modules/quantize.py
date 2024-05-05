@@ -5,6 +5,31 @@ from modules.style_encoder import StyleEncoder
 from facodec import CNNLSTM
 from gradient_reversal import GradientReversal
 import torch
+import torchaudio.functional as audio_F
+
+class MFCC(nn.Module):
+    def __init__(self, n_mfcc=40, n_mels=80):
+        super(MFCC, self).__init__()
+        self.n_mfcc = n_mfcc
+        self.n_mels = n_mels
+        self.norm = 'ortho'
+        dct_mat = audio_F.create_dct(self.n_mfcc, self.n_mels, self.norm)
+        self.register_buffer('dct_mat', dct_mat)
+
+    def forward(self, mel_specgram):
+        if len(mel_specgram.shape) == 2:
+            mel_specgram = mel_specgram.unsqueeze(0)
+            unsqueezed = True
+        else:
+            unsqueezed = False
+        # (channel, n_mels, time).tranpose(...) dot (n_mels, n_mfcc)
+        # -> (channel, time, n_mfcc).tranpose(...)
+        mfcc = torch.matmul(mel_specgram.transpose(1, 2), self.dct_mat).transpose(1, 2)
+
+        # unpack batch
+        if unsqueezed:
+            mfcc = mfcc.squeeze(0)
+        return mfcc
 class FAquantizer(nn.Module):
     def __init__(self, in_dim=1024,
                  n_p_codebooks=1,
@@ -42,14 +67,19 @@ class FAquantizer(nn.Module):
         self.melspec_encoder = WN(hidden_channels=256, kernel_size=5, dilation_rate=1, n_layers=8, gin_channels=0, p_dropout=0.2)
         self.melspec_linear2 = nn.Conv1d(256, 1024, 1)
 
-        self.timbre_encoder = StyleEncoder(in_dim=1024, hidden_dim=256, out_dim=1024)
+        self.content_linear = nn.Conv1d(40, 256, 1)
+        self.content_encoder = WN(hidden_channels=256, kernel_size=5, dilation_rate=1, n_layers=16, gin_channels=0, p_dropout=0.2)
+        self.content_linear2 = nn.Conv1d(256, 1024, 1)
+        self.to_mfcc = MFCC(n_mfcc=40, n_mels=80)
+
+        self.timbre_encoder = StyleEncoder(in_dim=80, hidden_dim=256, out_dim=1024)
         self.timbre_linear = nn.Linear(1024, 1024 * 2)
         self.timbre_linear.bias.data[:1024] = 1
         self.timbre_linear.bias.data[1024:] = 0
         self.timbre_norm = nn.LayerNorm(1024, elementwise_affine=False)
 
-    def forward(self, x, prosody_feature):
-        timbre = self.timbre_encoder(x, torch.ones(x.shape[0], 1, x.shape[2]).to(x.device).bool())
+    def forward(self, x, prosody_feature, timbre_feature):
+        timbre = self.timbre_encoder(timbre_feature, torch.ones(x.shape[0], 1, x.shape[2]).to(x.device).bool())
 
         outs = 0
 
@@ -58,13 +88,18 @@ class FAquantizer(nn.Module):
         f0_input = self.melspec_encoder(f0_input, torch.ones(f0_input.shape[0], 1, f0_input.shape[2]).to(f0_input.device).bool())
         f0_input = self.melspec_linear2(f0_input)
 
+        content_input = self.to_mfcc(timbre_feature)
+        content_input = self.content_linear(content_input)
+        content_input = self.content_encoder(content_input, torch.ones(content_input.shape[0], 1, content_input.shape[2]).to(content_input.device).bool())
+        content_input = self.content_linear2(content_input)
+
         z_p, codes_p, latents_p, commitment_loss_p, codebook_loss_p = self.prosody_quantizer(
             f0_input, 1
         )
         outs += z_p
 
         z_c, codes_c, latents_c, commitment_loss_c, codebook_loss_c = self.content_quantizer(
-            x, 2
+            content_input, 2
         )
         outs += z_c
 
@@ -110,22 +145,22 @@ class FApredictors(nn.Module):
 
         if self.use_gr_residual_f0:
             self.res_f0_predictor = nn.Sequential(
-                GradientReversal(alpha=1.0), CNNLSTM(in_dim, 1, 2)
+                GradientReversal(alpha=0.5), CNNLSTM(in_dim, 1, 2)
             )
 
         if self.use_gr_residual_phone > 0:
             self.res_phone_predictor = nn.Sequential(
-                GradientReversal(alpha=1.0), CNNLSTM(in_dim, 1024, 1)
+                GradientReversal(alpha=0.5), CNNLSTM(in_dim, 1024, 1)
             )
 
         if self.use_gr_content_f0:
             self.content_f0_predictor = nn.Sequential(
-                GradientReversal(alpha=1.0), CNNLSTM(in_dim, 1, 2)
+                GradientReversal(alpha=0.5), CNNLSTM(in_dim, 1, 2)
             )
 
         if self.use_gr_prosody_phone:
             self.prosody_phone_predictor = nn.Sequential(
-                GradientReversal(alpha=1.0), CNNLSTM(in_dim, 1024, 1)
+                GradientReversal(alpha=0.5), CNNLSTM(in_dim, 1024, 1)
             )
 
         if self.use_gr_x_timbre:

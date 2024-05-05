@@ -222,12 +222,15 @@ def main(args):
             # extract content with w2v model
             with torch.no_grad():
                 RVQ_1 = w2v_model.encode(wav_seg4c.to(device), n_q=1)
+                RVQ_1_latent = w2v_model.quantizer.decode(RVQ_1, st=0)
             RVQ_1 = F.interpolate(RVQ_1.float(), int(RVQ_1.size(-1) * 1.6), mode='nearest')
+            RVQ_1_latent = F.interpolate(RVQ_1_latent.float(), int(RVQ_1_latent.size(-1) * 1.6), mode='nearest')
             target_content_tokens = RVQ_1.squeeze()[:, single_side_context // 200:-single_side_context // 200].long()
+            target_content_latents = RVQ_1_latent[..., single_side_context // 200:-single_side_context // 200]
 
             z = model.encoder(wav_seg)
             mel_prosody = gt_mel_seg[:, :20, :]
-            z, quantized, commitment_loss, codebook_loss, timbre = model.quantizer(z, mel_prosody)
+            z, quantized, commitment_loss, codebook_loss, timbre = model.quantizer(z, mel_prosody, gt_mel_seg)
             preds, rev_preds = model.fa_predictors(quantized, timbre)
             # z, codes, latents, commitment_loss, codebook_loss = model.quantizer(
             #     z, 12
@@ -294,16 +297,20 @@ def main(args):
             pred_content = preds['content']
             p_pred_content = rev_preds['prosody_content']
             r_pred_content = rev_preds['res_content']
-            content_loss = F.cross_entropy(pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1)
-            p_content_loss = F.cross_entropy(p_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1) if p_pred_content is not None else torch.FloatTensor([0]).to(device)
-            r_content_loss = F.cross_entropy(r_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1) if r_pred_content is not None else torch.FloatTensor([0]).to(device)
+            # content_loss = F.cross_entropy(pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1)
+            # p_content_loss = F.cross_entropy(p_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1) if p_pred_content is not None else torch.FloatTensor([0]).to(device)
+            # r_content_loss = F.cross_entropy(r_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1) if r_pred_content is not None else torch.FloatTensor([0]).to(device)
+
+            content_loss = F.l1_loss(pred_content.transpose(1, 2), target_content_latents)
+            p_content_loss = F.l1_loss(p_pred_content.transpose(1, 2), target_content_latents) if p_pred_content is not None else torch.FloatTensor([0]).to(device)
+            r_content_loss = F.l1_loss(r_pred_content.transpose(1, 2), target_content_latents) if r_pred_content is not None else torch.FloatTensor([0]).to(device)
 
             tot_content_loss = content_loss + p_content_loss + r_content_loss
 
             # top 10 accuracy
-            content_top10_acc = content_metric(pred_content.transpose(1, 2), target_content_tokens)
-            p_content_top10_acc = content_metric(p_pred_content.transpose(1, 2), target_content_tokens) if p_pred_content is not None else torch.FloatTensor([0]).to(device)
-            r_content_top10_acc = content_metric(r_pred_content.transpose(1, 2), target_content_tokens) if r_pred_content is not None else torch.FloatTensor([0]).to(device)
+            # content_top10_acc = content_metric(pred_content.transpose(1, 2), target_content_tokens)
+            # p_content_top10_acc = content_metric(p_pred_content.transpose(1, 2), target_content_tokens) if p_pred_content is not None else torch.FloatTensor([0]).to(device)
+            # r_content_top10_acc = content_metric(r_pred_content.transpose(1, 2), target_content_tokens) if r_pred_content is not None else torch.FloatTensor([0]).to(device)
 
             # loss on predicting speaker
             spk_pred_logits = preds['timbre']
@@ -314,7 +321,7 @@ def main(args):
             tot_spk_loss = spk_loss + x_spk_loss
 
             loss_gen_all = mel_loss * 15.0 + loss_feature * 1.0 + loss_g * 1.0 + commitment_loss * 0.25 + codebook_loss * 1.0 \
-                            + tot_f0_loss * 1.0 + tot_uv_loss * 1.0 + tot_content_loss * 1.0 + tot_spk_loss * 1.0
+                            + tot_f0_loss * 1.0 + tot_uv_loss * 1.0 + tot_content_loss * 5.0 + tot_spk_loss * 1.0
 
             optimizer.zero_grad()
             accelerator.backward(loss_gen_all)
@@ -368,7 +375,7 @@ def main(args):
                     writer.add_scalar('pred/uv_loss', uv_loss.item(), iters)
                     writer.add_scalar('pred/content_loss', content_loss.item(), iters)
                     writer.add_scalar('pred/spk_loss', spk_loss.item(), iters)
-                    writer.add_scalar('pred/content_top10_acc', content_top10_acc.item(), iters)
+                    # writer.add_scalar('pred/content_top10_acc', content_top10_acc.item(), iters)
 
                     writer.add_scalar('rev_pred/c_f0_loss', c_f0_loss.item(), iters)
                     writer.add_scalar('rev_pred/c_uv_loss', c_uv_loss.item(), iters)
@@ -377,8 +384,8 @@ def main(args):
                     writer.add_scalar('rev_pred/r_f0_loss', r_f0_loss.item(), iters)
                     writer.add_scalar('rev_pred/r_uv_loss', r_uv_loss.item(), iters)
                     writer.add_scalar('rev_pred/x_spk_loss', x_spk_loss.item(), iters)
-                    writer.add_scalar('rev_pred/p_content_top10_acc', p_content_top10_acc.item(), iters)
-                    writer.add_scalar('rev_pred/r_content_top10_acc', r_content_top10_acc.item(), iters)
+                    # writer.add_scalar('rev_pred/p_content_top10_acc', p_content_top10_acc.item(), iters)
+                    # writer.add_scalar('rev_pred/r_content_top10_acc', r_content_top10_acc.item(), iters)
 
 
                     print('Time elasped:', time.time() - start_time)
@@ -390,6 +397,22 @@ def main(args):
 
                     # put ground truth audio
                     writer.add_audio('train/gt_audio', wav_seg[0], iters, sample_rate=16000)
+
+                    with torch.no_grad():
+                        # without timbre norm
+                        p_pred_wave = model.decoder(quantized[0][0:1])
+                        c_pred_wave = model.decoder(quantized[1][0:1])
+                        r_pred_wave = model.decoder(quantized[2][0:1])
+                        pc_pred_wave = model.decoder(quantized[0][0:1] + quantized[1][0:1])
+                        pr_pred_wave = model.decoder(quantized[0][0:1] + quantized[2][0:1])
+                        pcr_pred_wave = model.decoder(quantized[0][0:1] + quantized[1][0:1] + quantized[2][0:1])
+
+                    writer.add_audio('partial/pred_audio_p', p_pred_wave[0], iters, sample_rate=16000)
+                    writer.add_audio('partial/pred_audio_c', c_pred_wave[0], iters, sample_rate=16000)
+                    writer.add_audio('partial/pred_audio_r', r_pred_wave[0], iters, sample_rate=16000)
+                    writer.add_audio('partial/pred_audio_pc', pc_pred_wave[0], iters, sample_rate=16000)
+                    writer.add_audio('partial/pred_audio_pr', pr_pred_wave[0], iters, sample_rate=16000)
+                    writer.add_audio('partial/pred_audio_pcr', pcr_pred_wave[0], iters, sample_rate=16000)
 
             if iters % save_interval == 0 and accelerator.is_main_process:
                 print('Saving..')
