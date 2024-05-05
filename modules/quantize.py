@@ -112,25 +112,23 @@ class FAquantizer(nn.Module):
             residual_feature, 3
         )
 
-        if self.training:
-            bsz = z_r.shape[0]
-            res_mask = np.random.choice(
-                [0, 1],
-                size=bsz,
-                p=[
-                    self.prob_random_mask_residual,
-                    1 - self.prob_random_mask_residual,
-                ],
-            )
-            res_mask = (
-                torch.from_numpy(res_mask).unsqueeze(1).unsqueeze(1)
-            )  # (B, 1, 1)
-            res_mask = res_mask.to(
-                device=z_r.device, dtype=z_r.dtype
-            )
-            z_r = z_r * res_mask
+        bsz = z_r.shape[0]
+        res_mask = np.random.choice(
+            [0, 1],
+            size=bsz,
+            p=[
+                self.prob_random_mask_residual,
+                1 - self.prob_random_mask_residual,
+            ],
+        )
+        res_mask = (
+            torch.from_numpy(res_mask).unsqueeze(1).unsqueeze(1)
+        )  # (B, 1, 1)
+        res_mask = res_mask.to(
+            device=z_r.device, dtype=z_r.dtype
+        )
 
-        outs += z_r
+        outs += z_r * res_mask
 
         quantized = [z_p, z_c, z_r]
         commitment_losses = commitment_loss_p + commitment_loss_c + commitment_loss_r

@@ -253,6 +253,10 @@ def main(args):
 
                 f0_targets.append(normalized_sequence[single_side_context // 200:-single_side_context // 200])
             f0_targets = torch.stack(f0_targets).to(device)
+            # fill nan with -10
+            f0_targets[torch.isnan(f0_targets)] = -10.0
+            # fill inf with -10
+            f0_targets[torch.isinf(f0_targets)] = -10.0
 
             # extract content with w2v model
             with torch.no_grad():
@@ -321,7 +325,7 @@ def main(args):
             f0_loss = F.smooth_l1_loss(f0_targets, pred_f0.squeeze(-1))
             uv_loss = F.smooth_l1_loss(real_norm, pred_uv.squeeze(-1))
             c_f0_loss = F.smooth_l1_loss(f0_targets, c_pred_f0.squeeze(-1)) if c_pred_f0 is not None else torch.FloatTensor([0]).to(device)
-            c_uv_loss = F.smooth_l1_loss(real_norm, c_pred_uv.squeeze(-1)) if c_pred_uv is not None else torch.FloatTensor([0]).to(device)
+            c_uv_loss = torch.FloatTensor([0]).to(device) # content should contain energy information so do not reverse this one
             r_f0_loss = F.smooth_l1_loss(f0_targets, r_pred_f0.squeeze(-1)) if r_pred_f0 is not None else torch.FloatTensor([0]).to(device)
             r_uv_loss = F.smooth_l1_loss(real_norm, r_pred_uv.squeeze(-1)) if r_pred_uv is not None else torch.FloatTensor([0]).to(device)
 
@@ -427,20 +431,35 @@ def main(args):
             if iters % (log_interval * 10) == 0 and accelerator.is_main_process:
 
                 with torch.no_grad():
-                    # put predicted audio
-                    writer.add_audio('train/pred_audio', pred_wave[0], iters, sample_rate=16000)
-
                     # put ground truth audio
-                    writer.add_audio('train/gt_audio', wav_seg[0], iters, sample_rate=16000)
+                    writer.add_audio('train/gt_audio', waves[0], iters, sample_rate=16000)
 
-                    with torch.no_grad():
-                        # without timbre norm
-                        p_pred_wave = model.decoder(quantized[0][0:1])
-                        c_pred_wave = model.decoder(quantized[1][0:1])
-                        r_pred_wave = model.decoder(quantized[2][0:1])
-                        pc_pred_wave = model.decoder(quantized[0][0:1] + quantized[1][0:1])
-                        pr_pred_wave = model.decoder(quantized[0][0:1] + quantized[2][0:1])
-                        pcr_pred_wave = model.decoder(quantized[0][0:1] + quantized[1][0:1] + quantized[2][0:1])
+                    # without timbre norm
+                    z = model.encoder(torch.from_numpy(waves[0])[None, None, ...].to(device).float())
+                    mel_prosody = mels[0:1, :20, :z.size(-1)]
+                    z, quantized, commitment_loss, codebook_loss, timbre = model.quantizer(z, mel_prosody,
+                                                                                           mels[0:1, :, :z.size(-1)])
+
+                    z2 = model.encoder(torch.from_numpy(waves[1])[None, None, ...].to(device).float())
+                    mel_prosody2 = mels[1:2, :20, :z2.size(-1)]
+                    z2, quantized2, commitment_loss2, codebook_loss2, timbre2 = model.quantizer(z2, mel_prosody2,
+                                                                                              mels[1:2, :, :z2.size(-1)])
+
+                    p_pred_wave = model.decoder(quantized[0][0:1])
+                    c_pred_wave = model.decoder(quantized[1][0:1])
+                    r_pred_wave = model.decoder(quantized[2][0:1])
+                    pc_pred_wave = model.decoder(quantized[0][0:1] + quantized[1][0:1])
+                    pr_pred_wave = model.decoder(quantized[0][0:1] + quantized[2][0:1])
+                    pcr_pred_wave = model.decoder(quantized[0][0:1] + quantized[1][0:1] + quantized[2][0:1])
+                    full_pred_wave = model.decoder(z)
+                    x = quantized[0] + quantized[1] + quantized[2]
+                    style2 = model.quantizer.timbre_linear(timbre2).unsqueeze(2)  # (B, 2d, 1)
+                    gamma, beta = style2.chunk(2, 1)  # (B, d, 1)
+                    x = x.transpose(1, 2)
+                    x = model.quantizer.timbre_norm(x)
+                    x = x.transpose(1, 2)
+                    x = x * gamma + beta
+                    vc_pred_wave = model.decoder(x)
 
                     writer.add_audio('partial/pred_audio_p', p_pred_wave[0], iters, sample_rate=16000)
                     writer.add_audio('partial/pred_audio_c', c_pred_wave[0], iters, sample_rate=16000)
@@ -448,6 +467,10 @@ def main(args):
                     writer.add_audio('partial/pred_audio_pc', pc_pred_wave[0], iters, sample_rate=16000)
                     writer.add_audio('partial/pred_audio_pr', pr_pred_wave[0], iters, sample_rate=16000)
                     writer.add_audio('partial/pred_audio_pcr', pcr_pred_wave[0], iters, sample_rate=16000)
+                    writer.add_audio('full/pred_audio', full_pred_wave[0], iters, sample_rate=16000)
+
+                    writer.add_audio('vc/ref_audio', waves[1], iters, sample_rate=16000)
+                    writer.add_audio('vc/pred_audio', vc_pred_wave[0], iters, sample_rate=16000)
 
             if iters % save_interval == 0 and accelerator.is_main_process:
                 print('Saving..')

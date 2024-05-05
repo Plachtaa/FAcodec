@@ -7,7 +7,7 @@ epochs: 1000 # number of epochs for first stage training (pre-training)
 batch_size: 32
 batch_length: 100 # maximum duration of audio in a batch (in seconds)
 max_len: 80 # maximum number of frames
-pretrained_model: ""
+pretrained_model: "/home/azureuser/FAcodec/Models/run/v2/FAcodec_epoch_00016_step_20000.pth"
 load_only_params: False # set to true if do not want to load epoch numbers and optimizer parameters
 
 F0_path: "modules/JDC/bst.t7"
