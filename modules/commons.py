@@ -192,63 +192,56 @@ def load_F0_models(path):
 
 
 def build_model(args):
-  from facodec import FACodecEncoderV2, FACodecDecoderV2, CNNLSTM, ArcMarginProduct
-  from .phoneme_predictor import PhonemePredictor
-  from gradient_reversal import GradientReversal
-  from .msstftd import MultiScaleSTFTDiscriminator
-  from .discriminators import MultiScaleDiscriminator, MultiPeriodDiscriminator
-  json_config = json.loads(open("./configs/bigvgan_base_24khz.json").read())
-  h = AttrDict(json_config)
+  # Generators
+  from dac.nn.quantize import ResidualVectorQuantize
+  from dac.model.dac import Encoder, Decoder
+  from modules.quantize import FAquantizer, FApredictors
 
-  fa_encoder = FACodecEncoderV2(
-    ngf=32,
-    up_ratios=[2, 4, 5, 5],
-    out_channels=256,
+  # Discriminators
+  from dac.model.discriminator import Discriminator
+
+  encoder = Encoder(d_model=64,
+                    strides=[2, 4, 5, 5],
+                    d_latent=1024)
+
+  quantizer = FAquantizer(in_dim=1024,
+                 n_p_codebooks=1,
+                 n_c_codebooks=2,
+                 n_r_codebooks=3,
+                 codebook_size=1024,
+                 codebook_dim=8,
+                 quantizer_dropout=0.5)
+
+  fa_predictors = FApredictors(in_dim=1024,
+                               use_gr_content_f0=False,
+                               use_gr_prosody_phone=False,
+                               use_gr_residual_f0=False,
+                               use_gr_residual_phone=False,
+                               use_gr_x_timbre=True,
+                               )
+
+  decoder = Decoder(
+    input_channel=1024,
+    channels=1536,
+    rates=[5, 5, 4, 2],
   )
 
-  fa_decoder = FACodecDecoderV2(
-    in_channels=256,
-    upsample_initial_channel=1024,
-    ngf=32,
-    up_ratios=[5, 5, 4, 2],
-    vq_num_q_c=2,
-    vq_num_q_p=1,
-    vq_num_q_r=3,
-    vq_dim=256,
-    codebook_dim=8,
-    codebook_size_prosody=10,
-    codebook_size_content=10,
-    codebook_size_residual=10,
-    use_gr_x_timbre=True,
-    use_gr_residual_f0=True,
-    use_gr_residual_phone=True,
-    use_random_mask_residual=True,
-    use_gr_content_f0=True,
-    use_gr_prosody_phone=True,
+  discriminator = Discriminator(
+    rates=[],
+    periods=[2, 3, 5, 7, 11],
+    fft_sizes=[2048, 1024, 512],
+    sample_rate=16000,
+    bands=[(0.0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0)],
   )
-
-  # content_phoneme_pr
-
-  msd = MultiScaleDiscriminator()
-  mpd = MultiPeriodDiscriminator()
-  stft_disc = MultiScaleSTFTDiscriminator(filters=32)
 
   nets = Munch(
-    fa_encoder=fa_encoder,
-    fa_decoder=fa_decoder,
-    # content_phoneme_predictor=content_phoneme_predictor,
-    # prosody_phoneme_predictor=prosody_phoneme_predictor,
-    # res_phoneme_predictor=res_phoneme_predictor,
-    # prosody_f0n_predictor=prosody_f0n_predictor,
-    # content_f0n_predictor=content_f0n_predictor,
-    # res_f0n_predictor=res_f0n_predictor,
-    # timbre_predictor=timbre_predictor,
-    # x_timbre_encoder=x_timbre_encoder,
-    # x_timbre_predictor=x_timbre_predictor,
-    msd=msd,
-    mpd=mpd,
-    stft_disc=stft_disc,
+    encoder=encoder,
+    quantizer=quantizer,
+    decoder=decoder,
+    discriminator=discriminator,
+    fa_predictors=fa_predictors,
   )
+
 
   return nets
 

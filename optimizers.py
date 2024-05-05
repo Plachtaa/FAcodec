@@ -101,7 +101,7 @@ def build_optimizer(model_dict, scheduler_params_dict, lr, type='AdamW'):
         else:
             raise ValueError('Unknown optimizer type: %s' % type)
 
-    schedulers = dict([(key, torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.99996))
+    schedulers = dict([(key, torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.999996))
                        for key, opt in optim.items()])
 
     multi_optim = MultiOptimizer(optim, schedulers)

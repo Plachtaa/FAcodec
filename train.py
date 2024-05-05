@@ -30,6 +30,9 @@ import logging
 from accelerate.logging import get_logger
 from speechtokenizer import SpeechTokenizer
 
+from dac.nn.loss import MultiScaleSTFTLoss, MelSpectrogramLoss, GANLoss, L1Loss
+from audiotools import AudioSignal
+
 
 logger = get_logger(__name__, log_level="DEBUG")
 # torch.autograd.set_detect_anomaly(True)
@@ -38,7 +41,7 @@ def main(args):
     config_path = args.config_path
     config = yaml.safe_load(open(config_path))
 
-    log_dir = config['log_dir'] + '/v1'
+    log_dir = config['log_dir'] + '/v2'
     if not osp.exists(log_dir): os.makedirs(log_dir, exist_ok=True)
     shutil.copy(config_path, osp.join(log_dir, osp.basename(config_path)))
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True, broadcast_buffers=False)
@@ -131,6 +134,18 @@ def main(args):
     # }
     spk_criterion = FocalLoss(gamma=2).to(device)
 
+    stft_criterion = MultiScaleSTFTLoss().to(device)
+    mel_criterion = MelSpectrogramLoss(
+        n_mels=[5, 10, 20, 40, 80, 160, 320],
+        window_lengths=[32, 64, 128, 256, 512, 1024, 2048],
+        mel_fmin=[0, 0, 0, 0, 0, 0, 0],
+        mel_fmax=[None, None, None, None, None, None, None],
+        pow=1.0,
+        mag_weight=0.0,
+        clamp_eps=1e-5,
+    ).to(device)
+    l1_criterion = L1Loss().to(device)
+
     train_dataloader = accelerator.prepare(train_dataloader)
 
     content_metric = MulticlassAccuracy(
@@ -138,6 +153,8 @@ def main(args):
             num_classes=1024,
             ignore_index=-1,
         ).to(device)
+
+
 
 
     for epoch in range(start_epoch, epochs):
@@ -155,16 +172,12 @@ def main(args):
             paths = batch[-1]
             batch = [b.to(device, non_blocking=True) if type(b) == torch.Tensor else b for b in batch[1:-1]]
             texts, input_lengths, mels, mel_input_length, speaker_labels, langs = batch
+            # note that the mel spec here must be sr=24000, n_fft=2048, hop_lenght=300, win_length=1200 to be compatible with f0 extractor
 
-            max_wave_length = max([len(wave) for wave in waves])
-            wave_tensors = [torch.FloatTensor(wave).to(device) for wave in waves]
-            wave_tensors = torch.stack([F.pad(wave, (0, max_wave_length - len(wave))) for wave in wave_tensors], dim=0).to(device)
-            wave_tensors = wave_tensors.unsqueeze(1)
-            enc_out = model.fa_encoder(wave_tensors)
-            mels = mels[..., :enc_out.size(2)]
-            mel_input_length = torch.clamp(mel_input_length, 0, enc_out.size(2))
-            mel_prosody = mels[:, :20, :]
-            vq_post_emb, vq_id, commit_loss, quantized, spk_embs = model.fa_decoder(enc_out, mel_prosody, eval_vq=False, vq=True)
+            # max_wave_length = max([len(wave) for wave in waves])
+            # wave_tensors = [torch.FloatTensor(wave).to(device) for wave in waves]
+            # wave_tensors = torch.stack([F.pad(wave, (0, max_wave_length - len(wave))) for wave in wave_tensors], dim=0).to(device)
+            # wave_tensors = wave_tensors.unsqueeze(1)
 
             # get clips
             mel_seg_len = min([int(mel_input_length.min().item()), max_frame_len])
@@ -172,151 +185,153 @@ def main(args):
             en = [[], [], []]
             gt_mel_seg = []
             wav_seg = []
-            # f0 = []
+            wav_seg4c = [] # for content extractor, add additional context
 
             for bib in range(len(mel_input_length)):
                 mel_length = int(mel_input_length[bib].item())
 
-                random_start = np.random.randint(0, mel_length - mel_seg_len)
-                for q, layer_q in enumerate(quantized):
-                    en[q].append(layer_q[bib, :, random_start:random_start + mel_seg_len])
+                random_start = np.random.randint(0, mel_length - mel_seg_len) if mel_length != mel_seg_len else 0
+                # for q, layer_q in enumerate(quantized):
+                #     en[q].append(layer_q[bib, :, random_start:random_start + mel_seg_len])
                 gt_mel_seg.append(mels[bib, :, random_start:random_start + mel_seg_len])
 
                 y = waves[bib][random_start * 200:(random_start + mel_seg_len) * 200]
+
+                if len(y) < mel_seg_len * 200:
+                    y = np.pad(y, (0, mel_seg_len * 200 - len(y)), 'constant')
                 wav_seg.append(torch.from_numpy(y).to(device))
-                # # F0
-                # f0.append(F0s[bib, (random_start * 2):((random_start + mel_len) * 2)])
 
-            en = [torch.stack(e) for e in en]
+                single_side_context = (3 * 16000 - mel_seg_len * 200) // 2
+                padded_wave = np.pad(waves[bib], (single_side_context, single_side_context), 'constant') # additional 1 sec context on both sides
+                random_start = random_start + single_side_context // 200
+                y_c = padded_wave[random_start * 200 - single_side_context:(random_start + mel_seg_len) * 200 + single_side_context]
+                wav_seg4c.append(torch.from_numpy(y_c).to(device))
+                assert (y == y_c[single_side_context:-single_side_context]).prod()
+
+
+            # en = [torch.stack(e) for e in en]
             gt_mel_seg = torch.stack(gt_mel_seg).detach()
-            # f0 = torch.stack(f0).detach()
 
-            wav_seg = torch.stack(wav_seg).float().detach()
+            wav_seg = torch.stack(wav_seg).float().detach().unsqueeze(1)
+            wav_seg4c = torch.stack(wav_seg4c).float().detach().unsqueeze(1)
 
             with torch.no_grad():
-                real_norm = log_norm(mels.unsqueeze(1)).squeeze(1).detach()
-                F0_real, _, _ = pitch_extractor(mels.unsqueeze(1))
-                # F0_real = F0_real.unsqueeze(0) if batch_size == 1 else F0_real
-
-
-            out = model.fa_decoder(None, None, eval_vq=False, vq=False, quantized=quantized, speaker_embedding=spk_embs, quantized_segment=en)
-
-            # generator loss
-            pred_wave = out['audio']
-            wav_seg = wav_seg.unsqueeze(1)
-            y_disc_r, fmap_r = model.stft_disc(wav_seg.contiguous())
-            y_disc_gen, fmap_gen = model.stft_disc(pred_wave.contiguous())
-            y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = model.mpd(
-                wav_seg.contiguous(), pred_wave.contiguous())
-            y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = model.msd(
-                wav_seg.contiguous(), pred_wave.contiguous())
-            # for decoder reconstruction
-            wav_tot_loss, rec_loss, adv_loss, feat_loss_tot, d_weight = loss_g(
-                commit_loss,
-                wav_seg,
-                pred_wave,
-                fmap_r,
-                fmap_gen,
-                y_disc_r,
-                y_disc_gen,
-                iters,
-                y_df_hat_r,
-                y_df_hat_g,
-                y_ds_hat_r,
-                y_ds_hat_g,
-                fmap_f_r,
-                fmap_f_g,
-                fmap_s_r,
-                fmap_s_g,
-            )
+                real_norm = log_norm(gt_mel_seg.unsqueeze(1)).squeeze(1).detach()
+                F0_real, _, _ = pitch_extractor(gt_mel_seg.unsqueeze(1))
 
             # extract content with w2v model
-            target_content_tokens = torch.zeros((len(waves), enc_out.size(-1))).to(device).long() - 1
-            for bib in range(len(waves)):
-                wave_tensor = torch.FloatTensor(waves[bib]).to(device)[None, None, :]
-                with torch.no_grad():
-                    RVQ_1 = w2v_model.encode(wave_tensor.to(device), n_q=1)
-                RVQ_1 = F.interpolate(RVQ_1.float(), mel_input_length[bib], mode='nearest')
-                target_content_tokens[bib, :mel_input_length[bib]] = RVQ_1.squeeze().long()
+            with torch.no_grad():
+                RVQ_1 = w2v_model.encode(wav_seg4c.to(device), n_q=1)
+            RVQ_1 = F.interpolate(RVQ_1.float(), int(RVQ_1.size(-1) * 1.6), mode='nearest')
+            target_content_tokens = RVQ_1.squeeze()[:, single_side_context // 200:-single_side_context // 200].long()
 
+            z = model.encoder(wav_seg)
+            mel_prosody = gt_mel_seg[:, :20, :]
+            z, quantized, commitment_loss, codebook_loss, timbre = model.quantizer(z, mel_prosody)
+            preds, rev_preds = model.fa_predictors(quantized, timbre)
+            # z, codes, latents, commitment_loss, codebook_loss = model.quantizer(
+            #     z, 12
+            # )  # z is quantized latent
+
+            pred_wave = model.decoder(z)
+
+            len_diff = wav_seg.size(-1) - pred_wave.size(-1)
+            if len_diff > 0:
+                wav_seg = wav_seg[..., len_diff // 2:-len_diff // 2]
+
+
+            # discriminator loss
+            d_fake = model.discriminator(pred_wave.detach())
+            d_real = model.discriminator(wav_seg)
+            loss_d = 0
+            for x_fake, x_real in zip(d_fake, d_real):
+                loss_d += torch.mean(x_fake[-1] ** 2)
+                loss_d += torch.mean((1 - x_real[-1]) ** 2)
+
+            optimizer.zero_grad()
+            accelerator.backward(loss_d)
+            grad_norm_d = torch.nn.utils.clip_grad_norm_(model.discriminator.parameters(), 10.0)
+            optimizer.step('discriminator')
+            optimizer.scheduler(key='discriminator')
+
+            # generator loss
+            signal = AudioSignal(wav_seg, sample_rate=16000)
+            recons = AudioSignal(pred_wave, sample_rate=16000)
+            stft_loss = stft_criterion(recons, signal)
+            mel_loss = mel_criterion(recons, signal)
+            waveform_loss = l1_criterion(recons, signal)
+
+            d_fake = model.discriminator(pred_wave)
+            d_real = model.discriminator(wav_seg)
+
+            loss_g = 0
+            for x_fake in d_fake:
+                loss_g += torch.mean((1 - x_fake[-1]) ** 2)
+
+            loss_feature = 0
+
+            for i in range(len(d_fake)):
+                for j in range(len(d_fake[i]) - 1):
+                    loss_feature += F.l1_loss(d_fake[i][j], d_real[i][j].detach())
+
+            # loss on predicting f0, uv, content and speaker
             # for f0 and energy prediction
-            pred_f0, pred_uv = out['f0'], out['uv']
-            c_pred_f0, c_pred_uv = out['content_f0'], out['content_uv']
-            r_pred_f0, r_pred_uv = out['res_f0'], out['res_uv']
-            f0_loss, uv_loss, c_f0_loss, c_uv_loss, r_f0_loss, r_uv_loss = 0, 0, 0, 0, 0, 0
-            for bib, mel_len in enumerate(mel_input_length):
-                f0_loss += F.smooth_l1_loss(F0_real[bib, :mel_len], pred_f0[bib, :mel_len].squeeze(-1))
-                uv_loss += F.smooth_l1_loss(real_norm[bib, :mel_len], pred_uv[bib, :mel_len].squeeze(-1))
-                c_f0_loss += F.smooth_l1_loss(F0_real[bib, :mel_len], c_pred_f0[bib, :mel_len].squeeze(-1))
-                c_uv_loss += F.smooth_l1_loss(real_norm[bib, :mel_len], c_pred_uv[bib, :mel_len].squeeze(-1))
-                r_f0_loss += F.smooth_l1_loss(F0_real[bib, :mel_len], r_pred_f0[bib, :mel_len].squeeze(-1))
-                r_uv_loss += F.smooth_l1_loss(real_norm[bib, :mel_len], r_pred_uv[bib, :mel_len].squeeze(-1))
-            f0_loss, uv_loss, c_f0_loss, c_uv_loss, r_f0_loss, r_uv_loss = (
-                f0_loss / len(mel_input_length), uv_loss / len(mel_input_length), c_f0_loss / len(mel_input_length),
-                c_uv_loss / len(mel_input_length), r_f0_loss / len(mel_input_length), r_uv_loss / len(mel_input_length))
+            pred_f0, pred_uv = preds['f0'], preds['uv']
+            c_pred_f0, c_pred_uv = rev_preds['content_f0'], rev_preds['content_uv']
+            r_pred_f0, r_pred_uv = rev_preds['res_f0'], rev_preds['res_uv']
 
-            tot_f0_loss, tot_uv_loss = (f0_loss + c_f0_loss + r_f0_loss)/3, (uv_loss + c_uv_loss + r_uv_loss)/3
+            f0_loss = F.smooth_l1_loss(F0_real, pred_f0.squeeze(-1))
+            uv_loss = F.smooth_l1_loss(real_norm, pred_uv.squeeze(-1))
+            c_f0_loss = F.smooth_l1_loss(F0_real, c_pred_f0.squeeze(-1)) if c_pred_f0 is not None else torch.FloatTensor([0]).to(device)
+            c_uv_loss = F.smooth_l1_loss(real_norm, c_pred_uv.squeeze(-1)) if c_pred_uv is not None else torch.FloatTensor([0]).to(device)
+            r_f0_loss = F.smooth_l1_loss(F0_real, r_pred_f0.squeeze(-1)) if r_pred_f0 is not None else torch.FloatTensor([0]).to(device)
+            r_uv_loss = F.smooth_l1_loss(real_norm, r_pred_uv.squeeze(-1)) if r_pred_uv is not None else torch.FloatTensor([0]).to(device)
 
-            spk_pred_logits = out['timbre']
-            x_spk_pred_logits = out['x_timbre']
+            tot_f0_loss = f0_loss + c_f0_loss + r_f0_loss
+            tot_uv_loss = uv_loss + c_uv_loss + r_uv_loss
+
+            # loss on predicting content
+            pred_content = preds['content']
+            p_pred_content = rev_preds['prosody_content']
+            r_pred_content = rev_preds['res_content']
+            content_loss = F.cross_entropy(pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1)
+            p_content_loss = F.cross_entropy(p_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1) if p_pred_content is not None else torch.FloatTensor([0]).to(device)
+            r_content_loss = F.cross_entropy(r_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1) if r_pred_content is not None else torch.FloatTensor([0]).to(device)
+
+            tot_content_loss = content_loss + p_content_loss + r_content_loss
+
+            # top 10 accuracy
+            content_top10_acc = content_metric(pred_content.transpose(1, 2), target_content_tokens)
+            p_content_top10_acc = content_metric(p_pred_content.transpose(1, 2), target_content_tokens) if p_pred_content is not None else torch.FloatTensor([0]).to(device)
+            r_content_top10_acc = content_metric(r_pred_content.transpose(1, 2), target_content_tokens) if r_pred_content is not None else torch.FloatTensor([0]).to(device)
+
+            # loss on predicting speaker
+            spk_pred_logits = preds['timbre']
+            x_spk_pred_logits = rev_preds['x_timbre']
             spk_loss = spk_criterion(spk_pred_logits, speaker_labels)
             x_spk_loss = spk_criterion(x_spk_pred_logits, speaker_labels)
 
-            pred_content = out['phone']
-            p_pred_content = out['prosody_phone']
-            r_pred_content = out['res_phone']
+            tot_spk_loss = spk_loss + x_spk_loss
 
-            content_loss = F.cross_entropy(pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1)
-            p_content_loss = F.cross_entropy(p_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1)
-            # p_content_loss = 0
-            r_content_loss = F.cross_entropy(r_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1)
-
-            tot_content_loss = (content_loss + p_content_loss + r_content_loss)/3
-
-            content_top10_acc = content_metric(pred_content.transpose(1, 2), target_content_tokens)
-            p_content_top10_acc = content_metric(p_pred_content.transpose(1, 2), target_content_tokens)
-            # p_content_top10_acc = 0
-            r_content_top10_acc = content_metric(r_pred_content.transpose(1, 2), target_content_tokens)
-
-            tot_spk_loss = (spk_loss + x_spk_loss)/2
-
-            loss_gen_all = wav_tot_loss + content_loss + f0_loss + uv_loss + spk_loss
-            # tot_f0_loss * 3 + tot_uv_loss * 3 + tot_content_loss * 3 + tot_spk_loss * 2
-            #  + content_loss + f0_loss + uv_loss + spk_loss # +\
-
+            loss_gen_all = mel_loss * 15.0 + loss_feature * 1.0 + loss_g * 1.0 + commitment_loss * 0.25 + codebook_loss * 1.0 \
+                            + tot_f0_loss * 1.0 + tot_uv_loss * 1.0 + tot_content_loss * 1.0 + tot_spk_loss * 1.0
 
             optimizer.zero_grad()
             accelerator.backward(loss_gen_all)
-            grad_norm_g = torch.nn.utils.clip_grad_norm_(model.fa_encoder.parameters(), 1000.0)
-            grad_norm_g2 = torch.nn.utils.clip_grad_norm_(model.fa_decoder.parameters(), 1000.0)
+            grad_norm_g = torch.nn.utils.clip_grad_norm_(model.encoder.parameters(), 1000.0)
+            grad_norm_g2 = torch.nn.utils.clip_grad_norm_(model.decoder.parameters(), 1000.0)
+            grad_norm_g3 = torch.nn.utils.clip_grad_norm_(model.quantizer.parameters(), 1000.0)
+            grad_norm_g4 = torch.nn.utils.clip_grad_norm_(model.fa_predictors.parameters(), 1000.0)
 
-            optimizer.step('fa_encoder')
-            optimizer.step('fa_decoder')
+            optimizer.step('encoder')
+            optimizer.step('decoder')
+            optimizer.step('quantizer')
+            optimizer.step('fa_predictors')
 
-
-            # update discriminator
-            y_disc_r_det, fmap_r_det = model.stft_disc(wav_seg.detach())
-            y_disc_gen_det, fmap_gen_det = model.stft_disc(pred_wave.detach())
-
-            # MPD
-            y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = model.mpd(
-                wav_seg.detach(), pred_wave.detach())
-            # MSD
-            y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = model.msd(
-                wav_seg.detach(), pred_wave.detach())
-
-            loss_d = loss_dis(
-                y_disc_r_det, y_disc_gen_det, fmap_r_det, fmap_gen_det,
-                y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g, y_ds_hat_r,
-                y_ds_hat_g, fmap_s_r, fmap_s_g, iters)
-
-            accelerator.backward(loss_d)
-            grad_norm_d = torch.nn.utils.clip_grad_norm_(model.stft_disc.parameters(), 1000.0)
-            grad_norm_d2 = torch.nn.utils.clip_grad_norm_(model.mpd.parameters(), 1000.0)
-            grad_norm_d3 = torch.nn.utils.clip_grad_norm_(model.msd.parameters(), 1000.0)
-            optimizer.step('stft_disc')
-            optimizer.step('mpd')
-            optimizer.step('msd')
+            optimizer.scheduler(key='encoder')
+            optimizer.scheduler(key='decoder')
+            optimizer.scheduler(key='quantizer')
+            optimizer.scheduler(key='fa_predictors')
 
 
             # optimizer.step()
@@ -325,45 +340,45 @@ def main(args):
 
             if iters % log_interval == 0 and accelerator.is_main_process:
                 with torch.no_grad():
-                    cur_lr = optimizer.schedulers['fa_encoder'].get_last_lr()[0] if i != 0 else 0
+                    cur_lr = optimizer.schedulers['encoder'].get_last_lr()[0] if i != 0 else 0
                     # log print and tensorboard
-                    print("Epoch %d, Iteration %d, Gen Loss: %.4f, Disc Loss: %.4f, wav Loss: %.4f, F0 Loss: %.4f, UV Loss: %.4f, W2V Loss: %.4f, SPK Loss: %.4f, Time: %.4f" % (
-                        epoch, iters, loss_gen_all.item(), loss_d.item(), wav_tot_loss.item(), f0_loss.item(), uv_loss.item(), content_loss.item(), spk_loss.item(), train_time_per_step))
+                    print("Epoch %d, Iteration %d, Gen Loss: %.4f, Disc Loss: %.4f, mel Loss: %.4f, Time: %.4f" % (
+                        epoch, iters, loss_gen_all.item(), loss_d.item(), mel_loss.item(), train_time_per_step))
+                    print("f0 Loss: %.4f, uv Loss: %.4f, content Loss: %.4f, spk Loss: %.4f" % (
+                        f0_loss.item(), uv_loss.item(), content_loss.item(), spk_loss.item()))
                     writer.add_scalar('train/lr', cur_lr, iters)
                     writer.add_scalar('train/time', train_time_per_step, iters)
 
-                    writer.add_scalar('grad_norm/fa_encoder', grad_norm_g, iters)
-                    writer.add_scalar('grad_norm/fa_decoder', grad_norm_g2, iters)
+                    writer.add_scalar('grad_norm/encoder', grad_norm_g, iters)
+                    writer.add_scalar('grad_norm/decoder', grad_norm_g2, iters)
+                    writer.add_scalar('grad_norm/fa_quantizer', grad_norm_g3, iters)
+                    writer.add_scalar('grad_norm/fa_predictors', grad_norm_g4, iters)
 
                     writer.add_scalar('train/loss_gen_all', loss_gen_all.item(), iters)
                     writer.add_scalar('train/loss_disc_all', loss_d.item(), iters)
-                    writer.add_scalar('train/wav_loss', wav_tot_loss.item(), iters)
-                    writer.add_scalar('train/rec_loss', rec_loss.item(), iters)
-                    writer.add_scalar('train/adv_loss', adv_loss.item(), iters)
-                    writer.add_scalar('train/feat_loss', feat_loss_tot.item(), iters)
-                    writer.add_scalar('train/f0_loss', f0_loss.item(), iters)
-                    writer.add_scalar('train/uv_loss', uv_loss.item(), iters)
-                    writer.add_scalar('train/content_loss', content_loss.item(), iters)
-                    writer.add_scalar('train/spk_loss', spk_loss.item(), iters)
-                    writer.add_scalar('train/content_top10_acc', content_top10_acc.item(), iters)
+                    writer.add_scalar('train/wav_loss', waveform_loss.item(), iters)
+                    writer.add_scalar('train/mel_loss', mel_loss.item(), iters)
+                    writer.add_scalar('train/stft_loss', stft_loss.item(), iters)
+                    writer.add_scalar('train/feat_loss', loss_feature.item(), iters)
 
-                    # writer.add_scalar('rev/c_f0_loss', c_f0_loss.item(), iters)
-                    # writer.add_scalar('rev/c_uv_loss', c_uv_loss.item(), iters)
-                    writer.add_scalar('rev/r_f0_loss', r_f0_loss.item(), iters)
-                    writer.add_scalar('rev/r_uv_loss', r_uv_loss.item(), iters)
-                    # writer.add_scalar('rev/p_content_loss', p_content_loss.item(), iters)
-                    writer.add_scalar('rev/r_content_loss', r_content_loss.item(), iters)
-                    writer.add_scalar('rev/x_spk_loss', x_spk_loss.item(), iters)
-                    writer.add_scalar('rev/r_content_top10_acc', r_content_top10_acc.item(), iters)
-                    # writer.add_scalar('rev/p_content_top10_acc', p_content_top10_acc.item(), iters)
+                    writer.add_scalar('train/commit_loss', commitment_loss.item(), iters)
+                    writer.add_scalar('train/codebook_loss', codebook_loss.item(), iters)
 
-                    writer.add_scalar('commit_loss/layer_0', commit_loss[0].item(), iters)
-                    writer.add_scalar('commit_loss/layer_1', commit_loss[1].item(), iters)
-                    writer.add_scalar('commit_loss/layer_2', commit_loss[2].item(), iters)
-                    writer.add_scalar('commit_loss/layer_3', commit_loss[3].item(), iters)
-                    writer.add_scalar('commit_loss/layer_4', commit_loss[4].item(), iters)
-                    writer.add_scalar('commit_loss/layer_5', commit_loss[5].item(), iters)
+                    writer.add_scalar('pred/f0_loss', f0_loss.item(), iters)
+                    writer.add_scalar('pred/uv_loss', uv_loss.item(), iters)
+                    writer.add_scalar('pred/content_loss', content_loss.item(), iters)
+                    writer.add_scalar('pred/spk_loss', spk_loss.item(), iters)
+                    writer.add_scalar('pred/content_top10_acc', content_top10_acc.item(), iters)
 
+                    writer.add_scalar('rev_pred/c_f0_loss', c_f0_loss.item(), iters)
+                    writer.add_scalar('rev_pred/c_uv_loss', c_uv_loss.item(), iters)
+                    writer.add_scalar('rev_pred/p_content_loss', p_content_loss.item(), iters)
+                    writer.add_scalar('rev_pred/r_content_loss', r_content_loss.item(), iters)
+                    writer.add_scalar('rev_pred/r_f0_loss', r_f0_loss.item(), iters)
+                    writer.add_scalar('rev_pred/r_uv_loss', r_uv_loss.item(), iters)
+                    writer.add_scalar('rev_pred/x_spk_loss', x_spk_loss.item(), iters)
+                    writer.add_scalar('rev_pred/p_content_top10_acc', p_content_top10_acc.item(), iters)
+                    writer.add_scalar('rev_pred/r_content_top10_acc', r_content_top10_acc.item(), iters)
 
 
                     print('Time elasped:', time.time() - start_time)
@@ -388,12 +403,6 @@ def main(args):
                 save_path = osp.join(log_dir, 'FAcodec_epoch_%05d_step_%05d.pth' % (epoch, iters))
                 torch.save(state, save_path)
             iters = iters + 1
-        optimizer.scheduler(key='fa_encoder')
-        optimizer.scheduler(key='fa_decoder')
-        optimizer.scheduler(key='stft_disc')
-        optimizer.scheduler(key='mpd')
-        optimizer.scheduler(key='msd')
-        accelerator.wait_for_everyone()
 
 
 if __name__ == "__main__":
