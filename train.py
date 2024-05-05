@@ -182,8 +182,9 @@ def main(args):
             # get clips
             mel_seg_len = min([int(mel_input_length.min().item()), max_frame_len])
 
-            en = [[], [], []]
+
             gt_mel_seg = []
+            gt_mel_seg4c = []
             wav_seg = []
             wav_seg4c = [] # for content extractor, add additional context
 
@@ -194,6 +195,11 @@ def main(args):
                 # for q, layer_q in enumerate(quantized):
                 #     en[q].append(layer_q[bib, :, random_start:random_start + mel_seg_len])
                 gt_mel_seg.append(mels[bib, :, random_start:random_start + mel_seg_len])
+
+                single_side_context = (3 * 80 - mel_seg_len) // 2
+                padded_mel = F.pad(mels[bib], (single_side_context, single_side_context), 'constant', value=-10.0)
+                random_start_pad = random_start + single_side_context
+                gt_mel_seg4c.append(padded_mel[:, random_start_pad - single_side_context:random_start_pad + mel_seg_len + single_side_context])
 
                 y = waves[bib][random_start * 200:(random_start + mel_seg_len) * 200]
 
@@ -211,13 +217,42 @@ def main(args):
 
             # en = [torch.stack(e) for e in en]
             gt_mel_seg = torch.stack(gt_mel_seg).detach()
+            gt_mel_seg4c = torch.stack(gt_mel_seg4c).detach()
 
             wav_seg = torch.stack(wav_seg).float().detach().unsqueeze(1)
             wav_seg4c = torch.stack(wav_seg4c).float().detach().unsqueeze(1)
 
             with torch.no_grad():
                 real_norm = log_norm(gt_mel_seg.unsqueeze(1)).squeeze(1).detach()
-                F0_real, _, _ = pitch_extractor(gt_mel_seg.unsqueeze(1))
+                F0_real, _, _ = pitch_extractor(gt_mel_seg4c.unsqueeze(1))
+
+            # normalize f0
+            # Remove unvoiced frames (replace with -1)
+            f0_targets = []
+            for bib in range(len(F0_real)):
+                voiced_indices = F0_real[bib] > 5.0
+                f0_voiced = F0_real[bib][voiced_indices]
+
+                if len(f0_voiced) != 0:
+                    # Convert to log scale
+                    log_f0 = f0_voiced.log2()
+
+                    # Calculate mean and standard deviation
+                    mean_f0 = log_f0.mean()
+                    std_f0 = log_f0.std()
+
+                    # Normalize the F0 sequence
+                    normalized_f0 = (log_f0 - mean_f0) / std_f0
+
+                    # Create the normalized F0 sequence with unvoiced frames
+                    normalized_sequence = torch.zeros_like(F0_real[bib])
+                    normalized_sequence[voiced_indices] = normalized_f0
+                    normalized_sequence[~voiced_indices] = -10  # Assign -10 to unvoiced frames
+                else:
+                    normalized_sequence = torch.zeros_like(F0_real[bib]) - 10.0
+
+                f0_targets.append(normalized_sequence[single_side_context // 200:-single_side_context // 200])
+            f0_targets = torch.stack(f0_targets).to(device)
 
             # extract content with w2v model
             with torch.no_grad():
@@ -283,11 +318,11 @@ def main(args):
             c_pred_f0, c_pred_uv = rev_preds['content_f0'], rev_preds['content_uv']
             r_pred_f0, r_pred_uv = rev_preds['res_f0'], rev_preds['res_uv']
 
-            f0_loss = F.smooth_l1_loss(F0_real, pred_f0.squeeze(-1))
+            f0_loss = F.smooth_l1_loss(f0_targets, pred_f0.squeeze(-1))
             uv_loss = F.smooth_l1_loss(real_norm, pred_uv.squeeze(-1))
-            c_f0_loss = F.smooth_l1_loss(F0_real, c_pred_f0.squeeze(-1)) if c_pred_f0 is not None else torch.FloatTensor([0]).to(device)
+            c_f0_loss = F.smooth_l1_loss(f0_targets, c_pred_f0.squeeze(-1)) if c_pred_f0 is not None else torch.FloatTensor([0]).to(device)
             c_uv_loss = F.smooth_l1_loss(real_norm, c_pred_uv.squeeze(-1)) if c_pred_uv is not None else torch.FloatTensor([0]).to(device)
-            r_f0_loss = F.smooth_l1_loss(F0_real, r_pred_f0.squeeze(-1)) if r_pred_f0 is not None else torch.FloatTensor([0]).to(device)
+            r_f0_loss = F.smooth_l1_loss(f0_targets, r_pred_f0.squeeze(-1)) if r_pred_f0 is not None else torch.FloatTensor([0]).to(device)
             r_uv_loss = F.smooth_l1_loss(real_norm, r_pred_uv.squeeze(-1)) if r_pred_uv is not None else torch.FloatTensor([0]).to(device)
 
             tot_f0_loss = f0_loss + c_f0_loss + r_f0_loss
