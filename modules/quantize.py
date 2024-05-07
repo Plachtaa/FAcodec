@@ -8,6 +8,12 @@ import torch
 import torchaudio.functional as audio_F
 import numpy as np
 
+def sequence_mask(length, max_length=None):
+  if max_length is None:
+    max_length = length.max()
+  x = torch.arange(max_length, dtype=length.dtype, device=length.device)
+  return x.unsqueeze(0) < length.unsqueeze(1)
+
 class MFCC(nn.Module):
     def __init__(self, n_mfcc=40, n_mels=80):
         super(MFCC, self).__init__()
@@ -81,8 +87,9 @@ class FAquantizer(nn.Module):
 
         self.prob_random_mask_residual = 0.75
 
-    def forward(self, x, prosody_feature, timbre_feature):
-        timbre = self.timbre_encoder(timbre_feature, torch.ones(x.shape[0], 1, x.shape[2]).to(x.device).bool())
+    def forward(self, x, prosody_feature, mel_segments, mels, mel_lens):
+        # timbre = self.timbre_encoder(mels, sequence_mask(mel_lens, mels.size(-1)).unsqueeze(1))
+        timbre = self.timbre_encoder(mel_segments, torch.ones(mel_segments.size(0), 1, mel_segments.size(2)).bool().to(mel_segments.device))
 
         outs = 0
 
@@ -91,7 +98,7 @@ class FAquantizer(nn.Module):
         f0_input = self.melspec_encoder(f0_input, torch.ones(f0_input.shape[0], 1, f0_input.shape[2]).to(f0_input.device).bool())
         f0_input = self.melspec_linear2(f0_input)
 
-        content_input = self.to_mfcc(timbre_feature)
+        content_input = self.to_mfcc(mel_segments)
         content_input = self.content_linear(content_input)
         content_input = self.content_encoder(content_input, torch.ones(content_input.shape[0], 1, content_input.shape[2]).to(content_input.device).bool())
         content_input = self.content_linear2(content_input)
@@ -99,14 +106,14 @@ class FAquantizer(nn.Module):
         z_p, codes_p, latents_p, commitment_loss_p, codebook_loss_p = self.prosody_quantizer(
             f0_input, 1
         )
-        outs += z_p
+        outs += z_p.detach()
 
         z_c, codes_c, latents_c, commitment_loss_c, codebook_loss_c = self.content_quantizer(
             content_input, 2
         )
-        outs += z_c
+        outs += z_c.detach()
 
-        residual_feature = x - z_p - z_c
+        residual_feature = x - outs
 
         z_r, codes_r, latents_r, commitment_loss_r, codebook_loss_r = self.residual_quantizer(
             residual_feature, 3

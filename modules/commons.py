@@ -213,7 +213,7 @@ def build_model(args):
                  quantizer_dropout=0.5)
 
   fa_predictors = FApredictors(in_dim=1024,
-                               use_gr_content_f0=False,
+                               use_gr_content_f0=True,
                                use_gr_prosody_phone=False,
                                use_gr_residual_f0=True,
                                use_gr_residual_phone=True,

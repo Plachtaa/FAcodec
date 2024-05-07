@@ -111,8 +111,8 @@ class TextCleaner:
         return indexes
 
 
-np.random.seed(1)
-random.seed(1)
+np.random.seed(114514)
+random.seed(114514)
 SPECT_PARAMS = {
     "n_fft": 2048,
     "win_length": 1200,
@@ -393,7 +393,9 @@ def build_dataloader(list_path,
                                  num_workers=num_workers,
                                  drop_last=True,
                                  collate_fn=collate_fn,
-                                 pin_memory=True)
+                                 pin_memory=True,
+                                 shuffle=True,
+                                 )
 
     return data_loader
 
