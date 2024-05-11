@@ -12,7 +12,7 @@ warnings.simplefilter('ignore')
 # load packages
 import random
 
-from meldataset import build_dataloader, mel_spectrogram
+from meldataset import build_dataloader
 from modules.commons import *
 from losses import *
 from optimizers import build_optimizer
@@ -41,7 +41,7 @@ def main(args):
     config_path = args.config_path
     config = yaml.safe_load(open(config_path))
 
-    log_dir = config['log_dir'] + '/v2/eval'
+    log_dir = config['log_dir'] + '/eval'
     if not osp.exists(log_dir): os.makedirs(log_dir, exist_ok=True)
     shutil.copy(config_path, osp.join(log_dir, osp.basename(config_path)))
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True, broadcast_buffers=False)
@@ -163,6 +163,8 @@ def main(args):
                 writer.add_audio(f'vc_pred/audio_{bib}', vc_pred_wave[0], iters, sample_rate=16000)
 
         iters = iters + 1
+        if iters > 10:
+            exit()
 
 
 if __name__ == "__main__":

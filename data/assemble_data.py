@@ -4,7 +4,7 @@ import random
 from tqdm import tqdm
 
 prepared_transcripts = [
-    "/home/azureuser/vctk/clean_transcripts.txt",
+    "/path/to/vctk/clean_transcripts.txt",
 ]
 
 target_dir = "./data/"

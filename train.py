@@ -12,7 +12,7 @@ warnings.simplefilter('ignore')
 # load packages
 import random
 
-from meldataset import build_dataloader, mel_spectrogram
+from meldataset import build_dataloader
 from modules.commons import *
 from losses import *
 from optimizers import build_optimizer
@@ -41,7 +41,7 @@ def main(args):
     config_path = args.config_path
     config = yaml.safe_load(open(config_path))
 
-    log_dir = config['log_dir'] + '/v2'
+    log_dir = config['log_dir']
     if not osp.exists(log_dir): os.makedirs(log_dir, exist_ok=True)
     shutil.copy(config_path, osp.join(log_dir, osp.basename(config_path)))
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True, broadcast_buffers=False)
@@ -59,7 +59,7 @@ def main(args):
     batch_length = config.get('batch_length', 120)
     device = accelerator.device
 
-    epochs = config.get('epochs_1st', 200)
+    epochs = config.get('epochs', 200)
     log_interval = config.get('log_interval', 10)
     saving_epoch = config.get('save_freq', 2)
     save_interval = config.get('save_interval', 1000)
@@ -166,12 +166,6 @@ def main(args):
             paths = batch[-1]
             batch = [b.to(device, non_blocking=True) if type(b) == torch.Tensor else b for b in batch[1:-1]]
             texts, input_lengths, mels, mel_input_length, speaker_labels, langs = batch
-            # note that the mel spec here must be sr=24000, n_fft=2048, hop_lenght=300, win_length=1200 to be compatible with f0 extractor
-
-            # max_wave_length = max([len(wave) for wave in waves])
-            # wave_tensors = [torch.FloatTensor(wave).to(device) for wave in waves]
-            # wave_tensors = torch.stack([F.pad(wave, (0, max_wave_length - len(wave))) for wave in wave_tensors], dim=0).to(device)
-            # wave_tensors = wave_tensors.unsqueeze(1)
 
             # get clips
             mel_seg_len = min([int(mel_input_length.min().item()), max_frame_len])
@@ -260,7 +254,7 @@ def main(args):
                 RVQ_1_latent = w2v_model.quantizer.decode(RVQ_1, st=0)
             RVQ_1 = F.interpolate(RVQ_1.float(), int(RVQ_1.size(-1) * 1.6), mode='nearest')
             RVQ_1_latent = F.interpolate(RVQ_1_latent.float(), int(RVQ_1_latent.size(-1) * 1.6), mode='nearest')
-            #target_content_tokens = RVQ_1.squeeze()[:, single_side_context // 200:-single_side_context // 200].long()
+            target_content_tokens = RVQ_1.squeeze()[:, single_side_context // 200:-single_side_context // 200].long()
             target_content_latents = RVQ_1_latent[..., single_side_context // 200:-single_side_context // 200]
 
             z = model.encoder(wav_seg)
@@ -337,6 +331,8 @@ def main(args):
             pred_content = preds['content']
             p_pred_content = rev_preds['prosody_content']
             r_pred_content = rev_preds['res_content']
+
+            # target_content_tokens = target_content_tokens[..., :common_min_size]
             # content_loss = F.cross_entropy(pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1)
             # p_content_loss = F.cross_entropy(p_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1) if p_pred_content is not None else torch.FloatTensor([0]).to(device)
             # r_content_loss = F.cross_entropy(r_pred_content.transpose(1, 2), target_content_tokens, ignore_index=-1) if r_pred_content is not None else torch.FloatTensor([0]).to(device)

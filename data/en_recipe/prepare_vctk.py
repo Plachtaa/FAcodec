@@ -103,7 +103,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root', type=str, default='/home/azureuser/vctk/')
+    parser.add_argument('--root', type=str, default='/path/to/dataset/')
     parser.add_argument('--num_processes', type=int, default=cpu_count())
     args = parser.parse_args()
 

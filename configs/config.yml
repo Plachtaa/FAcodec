@@ -16,7 +16,6 @@ data_params:
   train_data: "./data/train.txt"
   val_data: "./data/val.txt"
   root_path: "./data/"
-  min_length: 30 # sample until texts with this size are obtained for OOD texts
 
 preprocess_params:
   sr: 16000
@@ -26,43 +25,12 @@ preprocess_params:
     hop_length: 200
 
 model_params:
-  latent_size: 32
-  dim_in: 64
-  hidden_dim: 512
-  max_conv_dim: 512
-  n_layer: 8
-  n_head: 8
-  n_mels: 80
-
-  language_transform: 'linear'
-
-  n_token: 183 # number of phoneme tokens
-  n_lang: 7 # number of languages
-  max_dur: 100 # maximum duration of a single phoneme
-
-  dropout: 0.0
-
-  bert_hidden_dim: 768 # hidden size of BERT
-  timbre_encoder_hidden_dim: 512 # hidden size of timbre encoder
-  timbre_encoder_n_layer: 6 # number of layers in timbre encoder
-  timbre_encoder_n_head: 8 # number of heads in timbre encoder
-
-  timbre_resampler_n_layer: 2 # number of layers in timbre resampler
-  timbre_resampler_n_head: 2 # number of heads in timbre resampler
-
-  text_timbre_n_attend: 2 # number of cross attention layers in text-timbre attention
-  text_timbre_n_layer: 2 # number of self attention layers after each cross attention layer in text-timbre attention
-
-  acoustic_decoder_hidden_dim: 768 # hidden size of acoustic decoder
-  acoustic_decoder_n_layer: 12 # number of layers in acoustic decoder
-  acoustic_decoder_n_head: 12 # number of heads in acoustic decoder
+  fixed: True
 
 loss_params:
   base_lr: 0.0001
   discriminator_iter_start: 2000
   lambda_spk: 1.0
   lambda_mel: 45
-  lambda_ctc: 1.0
-  lambda_s2s: 1.0
   lambda_f0: 1.0
   lambda_uv: 1.0
