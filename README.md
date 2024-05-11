@@ -6,6 +6,10 @@ with Factorized Codec and Diffusion Models](https://arxiv.org/pdf/2403.03100)
 Implementation is slightly different from the original paper. While the original version is based on phoneme prediction,
 which requires text transcription and phoneme-audio alignment, this implementation is based on predicting semantic latent,
 eliminating the need for text transcription and phoneme alignment.
+<br>
+<br>
+Current implementation is only experimented with VCTK dataset but it has already demonstrated successful speech reconstruction
+and content, timbre & prosody disentanglement abilities.
 
 ## Requirements
 - Python 3.10
@@ -19,6 +23,9 @@ An example of the dataset annotation file is provided in `data/val.txt`. Note th
 can be omitted if you do not have them, they are just placeholders. Only make sure audio paths are correct.  
 Put your prepared data under `./data/train.txt` and `./data/val.txt`.
 ## Training
+Download the semantic teacher (currently we are using [SpeechTokenizer](https://github.com/ZhangXInFD/SpeechTokenizer)) 
+from [here](https://huggingface.co/fnlp/SpeechTokenizer) and put the checkpoint and config file under `./w2v_models/`.   
+Then run the following command:
 ```
 accelerate launch train.py
 ```
