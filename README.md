@@ -5,7 +5,7 @@ with Factorized Codec and Diffusion Models](https://arxiv.org/pdf/2403.03100)
 
 Implementation is slightly different from the original paper. While the original version is based on phoneme prediction,
 which requires text transcription and phoneme-audio alignment, this implementation is based on predicting semantic latent,
-eliminating the need for text transcription and phoneme alignment.
+eliminating the need for this difficult part in data preparation (alignment is especially difficult).
 <br>
 <br>
 Current implementation is only experimented with VCTK dataset but it has already demonstrated successful speech reconstruction
