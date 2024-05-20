@@ -69,14 +69,13 @@ def main(args):
     train_path = data_params['train_data']
     val_path = data_params['val_data']
     root_path = data_params['root_path']
-    min_length = data_params['min_length']
     max_frame_len = config.get('max_len', 80)
     discriminator_iter_start = config['loss_params'].get('discriminator_iter_start', 0)
     loss_params = config.get('loss_params', {})
 
     train_dataloader = build_dataloader(train_path,
                                         root_path,
-                                        min_length=min_length,
+                                        min_length=30,
                                         batch_size=batch_size,
                                         batch_length=None,
                                         num_workers=4,
@@ -147,9 +146,6 @@ def main(args):
             num_classes=1024,
             ignore_index=-1,
         ).to(device)
-
-
-
 
     for epoch in range(start_epoch, epochs):
         start_time = time.time()
