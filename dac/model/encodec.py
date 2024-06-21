@@ -197,7 +197,7 @@ class SConv1d(nn.Module):
                  kernel_size: int, stride: int = 1, dilation: int = 1,
                  groups: int = 1, bias: bool = True, causal: bool = False,
                  norm: str = 'none', norm_kwargs: tp.Dict[str, tp.Any] = {},
-                 pad_mode: str = 'reflect'):
+                 pad_mode: str = 'reflect', **kwargs):
         super().__init__()
         # warn user on unusual setup between dilation and stride
         if stride > 1 and dilation > 1:
@@ -235,7 +235,7 @@ class SConvTranspose1d(nn.Module):
     def __init__(self, in_channels: int, out_channels: int,
                  kernel_size: int, stride: int = 1, causal: bool = False,
                  norm: str = 'none', trim_right_ratio: float = 1.,
-                 norm_kwargs: tp.Dict[str, tp.Any] = {}):
+                 norm_kwargs: tp.Dict[str, tp.Any] = {}, **kwargs):
         super().__init__()
         self.convtr = NormConvTranspose1d(in_channels, out_channels, kernel_size, stride,
                                           causal=causal, norm=norm, norm_kwargs=norm_kwargs)

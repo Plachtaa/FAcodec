@@ -3,6 +3,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from dac.model.encodec import SConv1d
+
 from . import commons
 LRELU_SLOPE = 0.1
 
@@ -99,8 +101,9 @@ class DDSConv(nn.Module):
 
 
 class WN(torch.nn.Module):
-    def __init__(self, hidden_channels, kernel_size, dilation_rate, n_layers, gin_channels=0, p_dropout=0):
+    def __init__(self, hidden_channels, kernel_size, dilation_rate, n_layers, gin_channels=0, p_dropout=0, causal=False):
         super(WN, self).__init__()
+        conv1d_type = SConv1d
         assert (kernel_size % 2 == 1)
         self.hidden_channels = hidden_channels
         self.kernel_size = kernel_size,
@@ -114,15 +117,13 @@ class WN(torch.nn.Module):
         self.drop = nn.Dropout(p_dropout)
 
         if gin_channels != 0:
-            cond_layer = torch.nn.Conv1d(gin_channels, 2 * hidden_channels * n_layers, 1)
-            self.cond_layer = torch.nn.utils.weight_norm(cond_layer, name='weight')
+            self.cond_layer = conv1d_type(gin_channels, 2 * hidden_channels * n_layers, 1, norm='weight_norm')
 
         for i in range(n_layers):
             dilation = dilation_rate ** i
             padding = int((kernel_size * dilation - dilation) / 2)
-            in_layer = torch.nn.Conv1d(hidden_channels, 2 * hidden_channels, kernel_size,
-                                       dilation=dilation, padding=padding)
-            in_layer = torch.nn.utils.weight_norm(in_layer, name='weight')
+            in_layer = conv1d_type(hidden_channels, 2 * hidden_channels, kernel_size, dilation=dilation,
+                                   padding=padding, norm='weight_norm', causal=causal)
             self.in_layers.append(in_layer)
 
             # last one is not necessary
@@ -131,8 +132,7 @@ class WN(torch.nn.Module):
             else:
                 res_skip_channels = hidden_channels
 
-            res_skip_layer = torch.nn.Conv1d(hidden_channels, res_skip_channels, 1)
-            res_skip_layer = torch.nn.utils.weight_norm(res_skip_layer, name='weight')
+            res_skip_layer = conv1d_type(hidden_channels, res_skip_channels, 1, norm='weight_norm', causal=causal)
             self.res_skip_layers.append(res_skip_layer)
 
     def forward(self, x, x_mask, g=None, **kwargs):

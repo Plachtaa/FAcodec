@@ -1,4 +1,4 @@
-log_dir: "Models/run_timbre_norm_ctc_titanet/"
+log_dir: "Models/run_redecoder_wavenet_noncausal"
 save_freq: 1
 log_interval: 10
 save_interval: 1000
@@ -8,6 +8,7 @@ batch_size: 4
 batch_length: 100 # maximum duration of audio in a batch (in seconds)
 max_len: 80 # maximum number of frames
 pretrained_model: ""
+pretrained_encoder: "./temp_ckpt.pth"
 load_only_params: False # set to true if do not want to load epoch numbers and optimizer parameters
 
 F0_path: "modules/JDC/bst.t7"
@@ -25,18 +26,19 @@ preprocess_params:
     hop_length: 300
 
 model_params:
-  fixed: True
-  causal: True
-  lstm: 2
-  norm_f0: True
-  use_gr_content_f0: False
-  use_gr_prosody_phone: False
-  use_gr_timbre_prosody: False
-  separate_prosody_encoder: True
+  encoder_causal: True
+  decoder_causal: False
+  encoder_lstm: 2
+  decoder_lstm: 0
   n_c_codebooks: 2
+  n_p_codebooks: 1
   timbre_norm: True
-  use_gr_content_global_f0: True
-  w2v: 'w2v-ctc'
+  separate_prosody_encoder: True
+  encoder_type: 'wavenet' # should be one of mamba, transformer or wavenet
+  wavenet_embed_dim: 512
+  mamba_embed_dim: 768
+  prob_random_mask_prosody: 0.5
+  prob_random_mask_content: [0.0, 0.5]
 
   DAC:
     encoder_dim: 64

@@ -5,12 +5,12 @@ tqdm
 argbind
 torchaudio
 soundfile
-phonemizer
 click
 PyYAML
 accelerate
 torchmetrics
-speechtokenizer
 munch
 librosa==0.9.0
 pandas
+descript-audio-codec
+transformers

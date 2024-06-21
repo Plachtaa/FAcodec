@@ -78,14 +78,14 @@ def rand_slice_segments(x, x_lengths=None, segment_size=4):
 
 
 def get_timing_signal_1d(
-    length, channels, min_timescale=1.0, max_timescale=1.0e4):
+        length, channels, min_timescale=1.0, max_timescale=1.0e4):
   position = torch.arange(length, dtype=torch.float)
   num_timescales = channels // 2
   log_timescale_increment = (
-      math.log(float(max_timescale) / float(min_timescale)) /
-      (num_timescales - 1))
+          math.log(float(max_timescale) / float(min_timescale)) /
+          (num_timescales - 1))
   inv_timescales = min_timescale * torch.exp(
-      torch.arange(num_timescales, dtype=torch.float) * -log_timescale_increment)
+    torch.arange(num_timescales, dtype=torch.float) * -log_timescale_increment)
   scaled_time = position.unsqueeze(0) * inv_timescales.unsqueeze(1)
   signal = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], 0)
   signal = F.pad(signal, [0, 0, 0, channels % 2])
@@ -144,10 +144,10 @@ def generate_path(duration, mask):
   mask: [b, 1, t_y, t_x]
   """
   device = duration.device
-  
+
   b, _, t_y, t_x = mask.shape
   cum_duration = torch.cumsum(duration, -1)
-  
+
   cum_duration_flat = cum_duration.view(b * t_x)
   path = sequence_mask(cum_duration_flat, t_y).to(mask.dtype)
   path = path.view(b, t_x, t_y)
@@ -190,57 +190,258 @@ def load_F0_models(path):
 
   return F0_model
 
+def modify_w2v_forward(self, output_layer=15):
+  '''
+  change forward method of w2v encoder to get its intermediate layer output
+  :param self:
+  :param layer:
+  :return:
+  '''
+  from transformers.modeling_outputs import BaseModelOutput
+  def forward(
+          hidden_states,
+          attention_mask=None,
+          output_attentions=False,
+          output_hidden_states=False,
+          return_dict=True,
+  ):
+    all_hidden_states = () if output_hidden_states else None
+    all_self_attentions = () if output_attentions else None
 
-def build_model(args):
-  # Generators
-  from dac.model.dac import Encoder, Decoder
-  from modules.quantize import FAquantizer, FApredictors
+    conv_attention_mask = attention_mask
+    if attention_mask is not None:
+      # make sure padded tokens output 0
+      hidden_states = hidden_states.masked_fill(~attention_mask.bool().unsqueeze(-1), 0.0)
 
-  # Discriminators
-  from dac.model.discriminator import Discriminator
+      # extend attention_mask
+      attention_mask = 1.0 - attention_mask[:, None, None, :].to(dtype=hidden_states.dtype)
+      attention_mask = attention_mask * torch.finfo(hidden_states.dtype).min
+      attention_mask = attention_mask.expand(
+        attention_mask.shape[0], 1, attention_mask.shape[-1], attention_mask.shape[-1]
+      )
 
-  encoder = Encoder(d_model=64,
-                    strides=[2, 4, 5, 5],
-                    d_latent=1024)
+    hidden_states = self.dropout(hidden_states)
 
-  quantizer = FAquantizer(in_dim=1024,
-                 n_p_codebooks=1,
-                 n_c_codebooks=2,
-                 n_r_codebooks=3,
-                 codebook_size=1024,
-                 codebook_dim=8,
-                 quantizer_dropout=0.5)
+    if self.embed_positions is not None:
+      relative_position_embeddings = self.embed_positions(hidden_states)
+    else:
+      relative_position_embeddings = None
 
-  fa_predictors = FApredictors(in_dim=1024,
-                               use_gr_content_f0=False,
-                               use_gr_prosody_phone=False,
-                               use_gr_residual_f0=True,
-                               use_gr_residual_phone=True,
-                               use_gr_x_timbre=True,
-                               )
+    deepspeed_zero3_is_enabled = False
 
-  decoder = Decoder(
-    input_channel=1024,
-    channels=1536,
-    rates=[5, 5, 4, 2],
-  )
+    for i, layer in enumerate(self.layers):
+      if output_hidden_states:
+        all_hidden_states = all_hidden_states + (hidden_states,)
 
-  discriminator = Discriminator(
-    rates=[],
-    periods=[2, 3, 5, 7, 11],
-    fft_sizes=[2048, 1024, 512],
-    sample_rate=16000,
-    bands=[(0.0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0)],
-  )
+      # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+      dropout_probability = torch.rand([])
 
-  nets = Munch(
-    encoder=encoder,
-    quantizer=quantizer,
-    decoder=decoder,
-    discriminator=discriminator,
-    fa_predictors=fa_predictors,
-  )
+      skip_the_layer = True if self.training and (dropout_probability < self.config.layerdrop) else False
+      if not skip_the_layer or deepspeed_zero3_is_enabled:
+        # under deepspeed zero3 all gpus must run in sync
+        if self.gradient_checkpointing and self.training:
+          layer_outputs = self._gradient_checkpointing_func(
+            layer.__call__,
+            hidden_states,
+            attention_mask,
+            relative_position_embeddings,
+            output_attentions,
+            conv_attention_mask,
+          )
+        else:
+          layer_outputs = layer(
+            hidden_states,
+            attention_mask=attention_mask,
+            relative_position_embeddings=relative_position_embeddings,
+            output_attentions=output_attentions,
+            conv_attention_mask=conv_attention_mask,
+          )
+        hidden_states = layer_outputs[0]
 
+      if skip_the_layer:
+        layer_outputs = (None, None)
+
+      if output_attentions:
+        all_self_attentions = all_self_attentions + (layer_outputs[1],)
+
+      if i == output_layer - 1:
+        break
+
+    if output_hidden_states:
+      all_hidden_states = all_hidden_states + (hidden_states,)
+
+    if not return_dict:
+      return tuple(v for v in [hidden_states, all_hidden_states, all_self_attentions] if v is not None)
+    return BaseModelOutput(
+      last_hidden_state=hidden_states,
+      hidden_states=all_hidden_states,
+      attentions=all_self_attentions,
+    )
+  return forward
+
+
+def build_model(args, stage='codec'):
+  if stage == 'codec':
+    # Generators
+    from dac.model.dac import Encoder, Decoder
+    from modules.quantize import FAquantizer, FApredictors, CNNLSTM, GradientReversal
+
+    # Discriminators
+    from dac.model.discriminator import Discriminator
+
+    encoder = Encoder(d_model=args.DAC.encoder_dim,
+                      strides=args.DAC.encoder_rates,
+                      d_latent=1024,
+                      causal=args.causal,
+                      lstm=args.lstm,)
+
+    quantizer = FAquantizer(in_dim=1024,
+                            n_p_codebooks=1,
+                            n_c_codebooks=args.n_c_codebooks,
+                            n_t_codebooks=2,
+                            n_r_codebooks=3,
+                            codebook_size=1024,
+                            codebook_dim=8,
+                            quantizer_dropout=0.5,
+                            causal=args.causal,
+                            separate_prosody_encoder=args.separate_prosody_encoder,
+                            timbre_norm=args.timbre_norm,
+                            )
+
+    fa_predictors = FApredictors(in_dim=1024,
+                                 use_gr_content_f0=args.use_gr_content_f0,
+                                 use_gr_prosody_phone=args.use_gr_prosody_phone,
+                                 use_gr_residual_f0=True,
+                                 use_gr_residual_phone=True,
+                                 use_gr_timbre_content=True,
+                                 use_gr_timbre_prosody=args.use_gr_timbre_prosody,
+                                 use_gr_x_timbre=True,
+                                 norm_f0=args.norm_f0,
+                                 timbre_norm=args.timbre_norm,
+                                 use_gr_content_global_f0=args.use_gr_content_global_f0,
+                                 )
+
+
+
+    decoder = Decoder(
+      input_channel=1024,
+      channels=args.DAC.decoder_dim,
+      rates=args.DAC.decoder_rates,
+      causal=args.causal,
+      lstm=args.lstm,
+    )
+
+    discriminator = Discriminator(
+      rates=[],
+      periods=[2, 3, 5, 7, 11],
+      fft_sizes=[2048, 1024, 512],
+      sample_rate=args.DAC.sr,
+      bands=[(0.0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0)],
+    )
+
+    rev_timbre_predictor = CNNLSTM(1024, 192, 1, global_pred=True)
+
+    nets = Munch(
+      encoder=encoder,
+      quantizer=quantizer,
+      decoder=decoder,
+      discriminator=discriminator,
+      fa_predictors=fa_predictors,
+      rev_timbre_predictor=rev_timbre_predictor,
+    )
+  elif stage == 'beta_vae':
+    from dac.model.dac import Encoder, Decoder
+    from modules.beta_vae import BetaVAE_Linear
+    # Discriminators
+    from dac.model.discriminator import Discriminator
+
+    encoder = Encoder(d_model=args.DAC.encoder_dim,
+                      strides=args.DAC.encoder_rates,
+                      d_latent=1024,
+                      causal=args.causal,
+                      lstm=args.lstm, )
+
+    decoder = Decoder(
+      input_channel=1024,
+      channels=args.DAC.decoder_dim,
+      rates=args.DAC.decoder_rates,
+      causal=args.causal,
+      lstm=args.lstm,
+    )
+
+    discriminator = Discriminator(
+      rates=[],
+      periods=[2, 3, 5, 7, 11],
+      fft_sizes=[2048, 1024, 512],
+      sample_rate=args.DAC.sr,
+      bands=[(0.0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0)],
+    )
+
+    beta_vae = BetaVAE_Linear(in_dim=1024, n_hidden=64, latent=8)
+
+    nets = Munch(
+      encoder=encoder,
+      decoder=decoder,
+      discriminator=discriminator,
+      beta_vae=beta_vae,
+    )
+  elif stage == 'redecoder':
+    # from vc.models import FastTransformer, SlowTransformer, Mambo
+    from dac.model.dac import Encoder, Decoder
+    from dac.model.discriminator import Discriminator
+    from modules.redecoder import Redecoder
+
+    encoder = Redecoder(args)
+
+    decoder = Decoder(
+      input_channel=1024,
+      channels=args.DAC.decoder_dim,
+      rates=args.DAC.decoder_rates,
+      causal=args.decoder_causal,
+      lstm=args.decoder_lstm,
+    )
+
+    discriminator = Discriminator(
+      rates=[],
+      periods=[2, 3, 5, 7, 11],
+      fft_sizes=[2048, 1024, 512],
+      sample_rate=args.DAC.sr,
+      bands=[(0.0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0)],
+    )
+
+    nets = Munch(
+      encoder=encoder,
+      decoder=decoder,
+      discriminator=discriminator,
+    )
+  elif stage == 'encoder':
+    from dac.model.dac import Encoder, Decoder
+    from modules.quantize import FAquantizer
+
+    encoder = Encoder(d_model=args.DAC.encoder_dim,
+                      strides=args.DAC.encoder_rates,
+                      d_latent=1024,
+                      causal=args.encoder_causal,
+                      lstm=args.encoder_lstm,)
+
+    quantizer = FAquantizer(in_dim=1024,
+                            n_p_codebooks=1,
+                            n_c_codebooks=args.n_c_codebooks,
+                            n_t_codebooks=2,
+                            n_r_codebooks=3,
+                            codebook_size=1024,
+                            codebook_dim=8,
+                            quantizer_dropout=0.5,
+                            causal=args.encoder_causal,
+                            separate_prosody_encoder=args.separate_prosody_encoder,
+                            timbre_norm=args.timbre_norm,
+                            )
+    nets = Munch(
+      encoder=encoder,
+      quantizer=quantizer,
+    )
+  else:
+    raise ValueError(f"Unknown stage: {stage}")
 
   return nets
 
@@ -257,7 +458,7 @@ def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_module
             params[key][k[len("module."):]] = params[key][k]
             del params[key][k]
       print('%s loaded' % key)
-      model[key].load_state_dict(params[key], strict=False)
+      model[key].load_state_dict(params[key], strict=True)
   _ = [model[key].eval() for key in model]
 
   if not load_only_params:
