@@ -13,13 +13,11 @@ import random
 
 from modules.commons import *
 from losses import *
-from optimizers import build_optimizer
+from hf_utils import load_custom_model_from_hf
 import time
 
 import torchaudio
 import librosa
-from audiotools import AudioSignal
-import glob
 
 
 SPECT_PARAMS = {
@@ -45,16 +43,27 @@ def preprocess(wave):
     return mel_tensor
 
 
-config = yaml.safe_load(open('configs/config_redecoder.yml'))
+ckpt_path, config_path = load_custom_model_from_hf("Plachta/FAcodec")
+
+config = yaml.safe_load(open(config_path))
+model_params = recursive_munch(config['model_params'])
+codec_encoder = build_model(model_params, stage="codec")
+
+ckpt_params = torch.load(ckpt_path, map_location="cpu")
+
+for key in codec_encoder:
+    codec_encoder[key].load_state_dict(ckpt_params[key])
+
+ckpt_path, config_path = load_custom_model_from_hf("Plachta/FAcodec-redecoder")
+
+config = yaml.safe_load(open(config_path))
 model_params = recursive_munch(config['model_params'])
 model = build_model(model_params, stage="redecoder")
-codec_encoder = build_model(model_params, stage="encoder")
 
-model, _, _, _ = load_checkpoint(model, None, "./FAredecoder_epoch_00010_step_1426000_wavenet_noncausal_c1.pth",
-                  load_only_params=True, ignore_modules=[], is_distributed=False)
+ckpt_params = torch.load(ckpt_path, map_location="cpu")
 
-codec_encoder, _, _, _ = load_checkpoint(codec_encoder, None, "./temp_ckpt.pth",
-                  load_only_params=True, ignore_modules=[], is_distributed=False)
+for key in model:
+    model[key].load_state_dict(ckpt_params[key])
 
 _ = [model[key].eval() for key in model]
 _ = [model[key].to(device) for key in model]
@@ -67,9 +76,9 @@ def get_parameter_number(model):
     return {'Total': total_num, 'Trainable': trainable_num}
 
 @torch.no_grad()
-def main():
-    source = "./test_waves/dingzhen_333.wav"
-    target = "./test_waves/teio_0.wav"
+def main(args):
+    source = args.source
+    target = args.target
     source_audio = librosa.load(source, sr=24000)[0]
     ref_audio = librosa.load(target, sr=24000)[0]
     # crop only the first 30 seconds
@@ -83,27 +92,27 @@ def main():
     z = codec_encoder.encoder(source_audio[None, ...].to(device).float())
     z, quantized, commitment_loss, codebook_loss, timbre, codes = codec_encoder.quantizer(z,
                                                                            source_audio[None, ...].to(device).float(),
-                                                                           torch.ones(1).to(device).bool(),
-                                                                           torch.ones(1).to(device).bool(),
                                                                            n_c=2, return_codes=True)
 
     z2 = codec_encoder.encoder(ref_audio[None, ...].to(device).float())
     z2, quantized2, commitment_loss2, codebook_loss2, timbre2, codes2 = codec_encoder.quantizer(z2,
                                                                                 ref_audio[None, ...].to(device).float(),
-                                                                                torch.ones(1).to(device).bool(),
-                                                                                torch.zeros(1).to(device).bool(),
                                                                                 n_c=2, return_codes=True)
     z = model.encoder(codes[0], codes[1], timbre, use_p_code=False, n_c=1)
     full_pred_wave = model.decoder(z)
     z2 = model.encoder(codes[0], codes[1], timbre2, use_p_code=False, n_c=1)
     full_pred_wave2 = model.decoder(z2)
 
-    os.makedirs("reconstructed", exist_ok=True)
+    os.makedirs("converted", exist_ok=True)
     source_name = source.split("/")[-1].split(".")[0]
     target_name = target.split("/")[-1].split(".")[0]
-    torchaudio.save(f"reconstructed/redecoder_full_pred_wave_{source_name}.wav", full_pred_wave[0].cpu(), 24000)
-    torchaudio.save(f"reconstructed/redecoder_vc_pred_wave_{source_name}_{target_name}.wav", full_pred_wave2[0].cpu(), 24000)
+    torchaudio.save(f"converted/reconstructed_{source_name}.wav", full_pred_wave[0].cpu(), 24000)
+    torchaudio.save(f"converted/vc_{source_name}_{target_name}.wav", full_pred_wave2[0].cpu(), 24000)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source", type=str, required=True)
+    parser.add_argument("--target", type=str, required=True)
+    args = parser.parse_args()
+    main(args)

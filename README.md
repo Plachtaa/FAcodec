@@ -32,12 +32,12 @@ We provide pretrained checkpoints on 50k hours speech data.
 
 ### Encode & reconstruct
 ```bash
-python reconstruct.py --source <source_wav> --target <target_wav>
+python reconstruct_redecoder.py --source <source_wav> --target <target_wav>
 ```
 Model weights will be automatically downloaded from Hugging Face.  
 For China mainland users, add additional environment variable to specify huggingface endpoint:
 ```bash
-HF_ENDPOINT=https://huggingface.co python reconstruct.py --source <source_wav> --target <target_wav>
+HF_ENDPOINT=https://huggingface.co python reconstruct_redecoder.py --source <source_wav> --target <target_wav>
 ```
 
 ## Extracting representations
