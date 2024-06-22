@@ -32,7 +32,7 @@ We provide pretrained checkpoints on 50k hours speech data.
 | FAcodec redecoder | [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-FAredecoder-blue)](https://huggingface.co/spaces/Plachta/FAcodecV2) |
 
 ## Demo
-Try our model on [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Space-blue)](https://huggingface.co/Plachta/FAcodec)!
+Try our model on [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Space-blue)](https://huggingface.co/spaces/Plachta/FAcodecV2)!
 
 ## Usage
 
