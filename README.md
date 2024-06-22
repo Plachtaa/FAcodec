@@ -24,10 +24,10 @@ pip install descript-audio-codec
 ## Model storage
 We provide pretrained checkpoints on 50k hours speech data.  
 
-| Model type        | Hugging Face Badge                                                                                                                   |
-|-------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| FAcodec           | [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Model%20A-blue)](https://huggingface.co/Plachta/FAcodec)           |
-| FAcodec redecoder | [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Model%20B-blue)](https://huggingface.co/Plachta/FAcodec-redecoder) |
+| Model type        | Link                                                                                                                                   |
+|-------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| FAcodec           | [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-FAcodec-blue)](https://huggingface.co/Plachta/FAcodec)               |
+| FAcodec redecoder | [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-FAredecoder-blue)](https://huggingface.co/Plachta/FAcodec-redecoder) |
 ## Usage
 
 ### Encode & reconstruct
