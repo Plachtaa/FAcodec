@@ -12,3 +12,4 @@ torchmetrics
 munch
 librosa
 transformers
+descript-audio-codec

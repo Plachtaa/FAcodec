@@ -1,6 +1,6 @@
 # FAcodec
 
-<br>This project is supported by [Amphion](https://github.com/open-mmlab/Amphion).
+This project is supported by [Amphion](https://github.com/open-mmlab/Amphion).
 
 Pytorch implementation for the training of FAcodec, which was proposed in paper [NaturalSpeech 3: Zero-Shot Speech Synthesis
 with Factorized Codec and Diffusion Models](https://arxiv.org/pdf/2403.03100)  
@@ -29,7 +29,11 @@ We provide pretrained checkpoints on 50k hours speech data.
 | Model type        | Link                                                                                                                                   |
 |-------------------|----------------------------------------------------------------------------------------------------------------------------------------|
 | FAcodec           | [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-FAcodec-blue)](https://huggingface.co/Plachta/FAcodec)               |
-| FAcodec redecoder | [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-FAredecoder-blue)](https://huggingface.co/Plachta/FAcodec-redecoder) |
+| FAcodec redecoder | [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-FAredecoder-blue)](https://huggingface.co/spaces/Plachta/FAcodecV2) |
+
+## Demo
+Try our model on [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Space-blue)](https://huggingface.co/Plachta/FAcodec)!
+
 ## Usage
 
 ### Encode & reconstruct

@@ -86,6 +86,7 @@ def gradio_interface():
     with gr.Blocks() as demo:
         gr.Markdown(
             "# FAcodec reconstruction and voice conversion"
+            "[![GitHub stars](https://img.shields.io/github/stars/username/repo-name.svg?style=social&label=Star&maxAge=2592000)](https://github.com/Plachtaa/FAcodec)"
             "FAcodec from [Natural Speech 3](https://arxiv.org/pdf/2403.03100). The checkpoint used in this demo is trained on an improved pipeline of "
             "where all kinds of annotations are not required, enabling the scale up of training data. <br>This model is "
             "trained on 50k hours of data with over 1 million speakers, largely improved timbre diversity compared to "
