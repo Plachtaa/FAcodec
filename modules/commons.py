@@ -339,15 +339,12 @@ def build_model(args, stage='codec'):
       bands=[(0.0, 0.1), (0.1, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0)],
     )
 
-    rev_timbre_predictor = CNNLSTM(1024, 192, 1, global_pred=True)
-
     nets = Munch(
       encoder=encoder,
       quantizer=quantizer,
       decoder=decoder,
       discriminator=discriminator,
       fa_predictors=fa_predictors,
-      rev_timbre_predictor=rev_timbre_predictor,
     )
   elif stage == 'beta_vae':
     from dac.model.dac import Encoder, Decoder

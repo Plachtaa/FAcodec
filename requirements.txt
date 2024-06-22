@@ -10,7 +10,5 @@ PyYAML
 accelerate
 torchmetrics
 munch
-librosa==0.9.0
-pandas
-descript-audio-codec
+librosa
 transformers

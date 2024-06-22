@@ -1,4 +1,4 @@
-log_dir: "Models/run_redecoder_wavenet_noncausal"
+log_dir: "Models/run_redecoder_wavenet"
 save_freq: 1
 log_interval: 10
 save_interval: 1000
@@ -37,8 +37,8 @@ model_params:
   encoder_type: 'wavenet' # should be one of mamba, transformer or wavenet
   wavenet_embed_dim: 512
   mamba_embed_dim: 768
-  prob_random_mask_prosody: 0.5
-  prob_random_mask_content: [0.0, 0.5]
+  prob_random_mask_prosody: 1.0
+  prob_random_mask_content: [0.0, 1.0]
 
   DAC:
     encoder_dim: 64

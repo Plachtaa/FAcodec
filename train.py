@@ -175,7 +175,7 @@ def main(args):
             train_start_time = time.time()
 
             batch = [b.to(device, non_blocking=True) for b in batch]
-            waves, mels, wave_lengths, mel_input_length, noises, noise_added_flags, recon_noisy_flags = batch
+            waves, mels, wave_lengths, mel_input_length = batch
 
             # extract semantic latent with w2v model
             waves_16k = torchaudio.functional.resample(waves, 24000, 16000)
@@ -259,25 +259,11 @@ def main(args):
                 f0_targets = F.interpolate(f0_targets.unsqueeze(1), mel_seg_len // 80 * frame_rate, mode='nearest').squeeze(1)
                 w2v_seg = F.interpolate(w2v_seg, mel_seg_len // 80 * frame_rate, mode='nearest')
 
-            # add noise according to noise_added_flags
-            # randomly determine a batch of signal to noise ratios, ranges in [1, 5]
-            snr = torch.rand(wav_seg.size(0)).to(device) * 4 + 1
-            # scale noise according to snr
-            speech_energy = torch.sum(wav_seg ** 2, dim=-1).squeeze(-1)
-            noise_energy = torch.sum(noises ** 2, dim=-1)
-
-            target_noise_energy = speech_energy / snr
-
-            scale_factor = torch.sqrt(target_noise_energy / (noise_energy + 1e-8))
-            scaled_noises = noises * scale_factor.unsqueeze(1) * noise_added_flags.unsqueeze(1)
-
-            wav_seg_input = wav_seg + scaled_noises.unsqueeze(1)
-            wav_seg_target = wav_seg + scaled_noises.unsqueeze(1) * recon_noisy_flags[:, None, None]
+            wav_seg_input = wav_seg
+            wav_seg_target = wav_seg
 
             z = model.encoder(wav_seg_input)
             z, quantized, commitment_loss, codebook_loss, timbre = model.quantizer(z, wav_seg_input,
-                                                                                   noise_added_flags,
-                                                                                   recon_noisy_flags,
                                                                                    n_c=2,
                                                                                    full_waves=waves,
                                                                                    wave_lens=wave_lengths)

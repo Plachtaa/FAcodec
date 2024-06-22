@@ -372,7 +372,7 @@ class FAquantizer(nn.Module):
         codebook_losses = codebook_loss_p + codebook_loss_c + codebook_loss_t + codebook_loss_r
 
         return outs, quantized, commitment_losses, codebook_losses
-    def forward_v2(self, x, wave_segments, noise_added_flags, recon_noisy_flags, n_c=1, n_t=2, full_waves=None, wave_lens=None, return_codes=False):
+    def forward_v2(self, x, wave_segments, n_c=1, n_t=2, full_waves=None, wave_lens=None, return_codes=False):
         # timbre = self.timbre_encoder(x, sequence_mask(mel_lens, mels.size(-1)).unsqueeze(1))
         if full_waves is None:
             mel = self.preprocess(wave_segments, n_bins=80)
@@ -431,11 +431,9 @@ class FAquantizer(nn.Module):
         res_mask = res_mask.to(
             device=z_r.device, dtype=z_r.dtype
         )
-        noise_must_on = noise_added_flags * recon_noisy_flags
-        noise_must_off = noise_added_flags * (~recon_noisy_flags)
-        res_mask[noise_must_on] = 1
-        res_mask[noise_must_off] = 0
 
+        if not self.training:
+            res_mask = torch.ones_like(res_mask)
         outs += z_r * res_mask
 
         quantized = [z_p, z_c, z_r]
