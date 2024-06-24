@@ -7,9 +7,6 @@ import yaml
 
 warnings.simplefilter('ignore')
 
-# load packages
-import random
-
 from modules.commons import *
 from hf_utils import load_custom_model_from_hf
 from losses import *
@@ -17,29 +14,7 @@ import time
 
 import torchaudio
 import librosa
-
-
-SPECT_PARAMS = {
-    "n_fft": 2048,
-    "win_length": 1200,
-    "hop_length": 300,
-}
-MEL_PARAMS = {
-    "n_mels": 80,
-}
-
-to_mel = torchaudio.transforms.MelSpectrogram(
-    n_mels=MEL_PARAMS['n_mels'], **SPECT_PARAMS)
-mean, std = -4, 4
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-def preprocess(wave):
-    # input is desired to be 16000hz, this operation resamples it to 24000hz
-    # wave = wave.unsqueeze(0)
-    wave_tensor = torch.from_numpy(wave).float()
-    # wave_tensor = torchaudio.functional.resample(wave_tensor, 16000, 24000)
-    mel_tensor = to_mel(wave_tensor)
-    mel_tensor = (torch.log(1e-5 + mel_tensor.unsqueeze(0)) - mean) / std
-    return mel_tensor
 
 ckpt_path, config_path = load_custom_model_from_hf("Plachta/FAcodec")
 

@@ -59,7 +59,36 @@ HF_ENDPOINT=https://hf-mirror.com python reconstruct_redecoder.py --source <sour
 ```
 
 ### Extracting representations
-WIP
+```python
+import yaml
+from modules.commons import build_model, recursive_munch
+from hf_utils import load_custom_model_from_hf
+import torch
+import torchaudio
+import librosa
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ckpt_path, config_path = load_custom_model_from_hf("Plachta/FAcodec")
+model = build_model(yaml.safe_load(open(config_path))['model_params'])
+ckpt_params = torch.load(ckpt_path, map_location="cpu")
+
+for key in ckpt_params:
+    model[key].load_state_dict(ckpt_params[key])
+
+_ = [model[key].eval() for key in model]
+_ = [model[key].to(device) for key in model]
+
+with torch.no_grad():
+    source = "path/to/source.wav"
+    source_audio = librosa.load(source, sr=24000)[0]
+    source_audio = torch.tensor(source_audio).unsqueeze(0).float().to(device)
+    z = model.encoder(source_audio[None, ...].to(device).float())
+    z, quantized, _, _, timbre, codes = model.quantizer(z, source_audio[None, ...].to(device).float(), return_codes=True)
+```
+where:  
+`timbre` is the timbre representation, one single vector for each utterance.  
+`codes[0]` is the prosody representation  
+`codes[1]` is the content representation
 
 ### Zero-shot voice conversion
 ```bash
