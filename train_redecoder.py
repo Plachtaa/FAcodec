@@ -11,7 +11,7 @@ warnings.simplefilter('ignore')
 # load packages
 import random
 
-from stream_dataset_tencent import build_dataloader
+from meldataset import build_dataloader
 from modules.commons import *
 from losses import *
 from optimizers import build_optimizer
