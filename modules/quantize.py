@@ -499,6 +499,11 @@ class FApredictors(nn.Module):
             self.forward = self.forward_v2
             self.global_f0_predictor = nn.Linear(in_dim, 1)
 
+        self.use_gr_content_global_f0 = use_gr_content_global_f0
+        if use_gr_content_global_f0:
+            self.rev_global_f0_predictor = nn.Sequential(
+                GradientReversal(alpha=1.0), CNNLSTM(in_dim, 1, 1, global_pred=True)
+            )
     def forward(self, quantized):
         prosody_latent = quantized[0]
         content_latent = quantized[1]
