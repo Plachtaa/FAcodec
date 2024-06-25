@@ -499,11 +499,6 @@ class FApredictors(nn.Module):
             self.forward = self.forward_v2
             self.global_f0_predictor = nn.Linear(in_dim, 1)
 
-        self.use_gr_content_global_f0 = use_gr_content_global_f0
-        if use_gr_content_global_f0:
-            self.rev_global_f0_predictor = nn.Sequential(
-                GradientReversal(alpha=1.0), CNNLSTM(in_dim, 1, 1, global_pred=True)
-            )
     def forward(self, quantized):
         prosody_latent = quantized[0]
         content_latent = quantized[1]
@@ -562,13 +557,12 @@ class FApredictors(nn.Module):
         }
         return preds, rev_preds
     def forward_v2(self, quantized, timbre):
-        assert self.use_gr_content_global_f0
         prosody_latent = quantized[0]
         content_latent = quantized[1]
         residual_latent = quantized[2]
         content_pred = self.phone_predictor(content_latent)[0]
 
-        # spk_pred = self.timbre_predictor(timbre)[0]
+        spk_pred = self.timbre_predictor(timbre)[0]
         f0_pred, uv_pred = self.f0_predictor(prosody_latent)
 
         prosody_rev_latent = torch.zeros_like(prosody_latent)
@@ -591,16 +585,11 @@ class FApredictors(nn.Module):
         else:
             x_spk_pred = None
 
-        global_f0_pred = self.global_f0_predictor(timbre)
-        if self.use_gr_content_global_f0:
-            rev_global_f0_pred = self.rev_global_f0_predictor(content_latent + prosody_latent + residual_latent)[0]
-
         preds = {
             'f0': f0_pred,
             'uv': uv_pred,
             'content': content_pred,
-            'timbre': None,
-            'global_f0': global_f0_pred,
+            'timbre': spk_pred,
         }
 
         rev_preds = {
@@ -608,6 +597,5 @@ class FApredictors(nn.Module):
             'rev_uv': rev_uv_pred,
             'rev_content': rev_content_pred,
             'x_timbre': x_spk_pred,
-            'rev_global_f0': rev_global_f0_pred,
         }
         return preds, rev_preds

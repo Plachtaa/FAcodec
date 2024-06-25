@@ -348,14 +348,14 @@ def main(args):
 
             tot_spk_loss = spk_loss + x_spk_loss
 
-            # global f0 loss
-            # get average f0
-            gt_glob_f0s = torch.stack(gt_glob_f0s)
-            global_f0_loss = F.smooth_l1_loss(gt_glob_f0s.unsqueeze(1), preds['global_f0'])
-            rev_global_f0_loss = F.smooth_l1_loss(gt_glob_f0s.unsqueeze(1), rev_preds['rev_global_f0']) if rev_preds['rev_global_f0'] is not None else torch.FloatTensor([0]).to(device)
+            # # global f0 loss
+            # # get average f0
+            # gt_glob_f0s = torch.stack(gt_glob_f0s)
+            # global_f0_loss = F.smooth_l1_loss(gt_glob_f0s.unsqueeze(1), preds['global_f0'])
+            # rev_global_f0_loss = F.smooth_l1_loss(gt_glob_f0s.unsqueeze(1), rev_preds['rev_global_f0']) if rev_preds['rev_global_f0'] is not None else torch.FloatTensor([0]).to(device)
 
             loss_gen_all = mel_loss * 15.0 + loss_feature * 1.0 + loss_g * 1.0 + commitment_loss * 0.25 + codebook_loss * 1.0 \
-                            + tot_f0_loss * 1.0 + tot_uv_loss * 1.0 + tot_content_loss * 5.0 + tot_spk_loss * 5.0 + global_f0_loss * 1.0 + rev_global_f0_loss * 1.0
+                            + tot_f0_loss * 1.0 + tot_uv_loss * 1.0 + tot_content_loss * 5.0 + tot_spk_loss * 1.0#  + global_f0_loss * 1.0 + rev_global_f0_loss * 1.0
 
             optimizer.zero_grad()
             accelerator.backward(loss_gen_all)
@@ -386,9 +386,9 @@ def main(args):
                     print("Epoch %d, Iteration %d, Gen Loss: %.4f, Disc Loss: %.4f, mel Loss: %.4f, Time: %.4f" % (
                         epoch, iters, loss_gen_all.item(), loss_d.item(), mel_loss.item(), train_time_per_step))
                     print("f0 Loss: %.4f, uv Loss: %.4f, content Loss: %.4f, spk Loss: %.4f, global_f0_loss: %.4f" % (
-                        f0_loss.item(), uv_loss.item(), content_loss.item(), spk_loss.item(), global_f0_loss.item()))
+                        f0_loss.item(), uv_loss.item(), content_loss.item(), spk_loss.item(), 0.))
                     print("rev f0 Loss: %.4f, rev uv Loss: %.4f, rev content Loss: %.4f, x spk Loss: %.4f, rev global f0 Loss: %.4f" % (
-                        rev_f0_loss.item(), rev_uv_loss.item(), rev_content_loss.item(), x_spk_loss.item(), rev_global_f0_loss.item())
+                        rev_f0_loss.item(), rev_uv_loss.item(), rev_content_loss.item(), x_spk_loss.item(), 0.)
                     )
                     writer.add_scalar('train/lr', cur_lr, iters)
                     writer.add_scalar('train/time', train_time_per_step, iters)
@@ -412,13 +412,11 @@ def main(args):
                     writer.add_scalar('pred/uv_loss', uv_loss.item(), iters)
                     writer.add_scalar('pred/content_loss', content_loss.item(), iters)
                     writer.add_scalar('pred/spk_loss', spk_loss.item(), iters)
-                    writer.add_scalar('pred/global_f0_loss', global_f0_loss.item(), iters)
 
                     writer.add_scalar('rev_pred/rev_f0_loss', rev_f0_loss.item(), iters)
                     writer.add_scalar('rev_pred/rev_uv_loss', rev_uv_loss.item(), iters)
                     writer.add_scalar('rev_pred/rev_content_loss', rev_content_loss.item(), iters)
                     writer.add_scalar('rev_pred/x_spk_loss', x_spk_loss.item(), iters)
-                    writer.add_scalar('rev_pred/rev_global_f0_loss', rev_global_f0_loss.item(), iters)
 
 
                     print('Time elasped:', time.time() - start_time)
