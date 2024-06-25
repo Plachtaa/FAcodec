@@ -562,7 +562,7 @@ class FApredictors(nn.Module):
         residual_latent = quantized[2]
         content_pred = self.phone_predictor(content_latent)[0]
 
-        spk_pred = self.timbre_predictor(timbre)[0]
+        spk_pred = self.timbre_predictor(timbre)
         f0_pred, uv_pred = self.f0_predictor(prosody_latent)
 
         prosody_rev_latent = torch.zeros_like(prosody_latent)
