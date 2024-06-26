@@ -173,7 +173,7 @@ def main(args):
             train_start_time = time.time()
 
             batch = [b.to(device, non_blocking=True) for b in batch]
-            waves, mels, wave_lengths, mel_input_length, noises, noise_added_flags, recon_noisy_flags = batch
+            waves, mels, wave_lengths, mel_input_length = batch
             # waves = torch.randn(4, 24000 * 10).to(device)
             # wave_lengths = torch.tensor([24000 * 10] * 4).to(device)
             # mels = torch.randn(4, 80, 80*10).to(device)
