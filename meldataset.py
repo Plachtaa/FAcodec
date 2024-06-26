@@ -41,7 +41,7 @@ mean, std = -4, 4
 
 def preprocess(wave):
     # wave = wave.unsqueeze(0)
-    wave_tensor = torch.from_numpy(wave).float()
+    wave_tensor = torch.from_numpy(wave).float() if isinstance(wave, np.ndarray) else wave
     mel_tensor = to_mel(wave_tensor)
     mel_tensor = (torch.log(1e-5 + mel_tensor.unsqueeze(0)) - mean) / std
     return mel_tensor
@@ -49,7 +49,6 @@ def preprocess(wave):
 
 class PseudoDataset(torch.utils.data.Dataset):
     def __init__(self,
-                 list_path,
                  sr=24000,
                  range=(1, 30), # length of the audio duration in seconds
                  ):
@@ -65,8 +64,10 @@ class PseudoDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         # replace this with your own data loading
         # wave, sr = librosa.load(self.data_list[idx], sr=self.sr)
-        wave = np.random.randn(self.sr * random.randint(*self.duration_range)).clamp(-1, 1)
-        mel = preprocess(wave)
+        wave = np.random.randn(self.sr * random.randint(*self.duration_range))
+        wave = wave / np.max(np.abs(wave))
+        mel = preprocess(wave).squeeze(0)
+        wave = torch.from_numpy(wave).float()
         return wave, mel
 
 
@@ -123,7 +124,7 @@ def build_dataloader(
         drop_last=True,
         collate_fn=collate_fn,
         pin_memory=True,
-        prefetch_factor=prefetch_factor,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
         # shuffle=True,
     )
 
