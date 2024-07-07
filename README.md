@@ -50,9 +50,9 @@ Remember to fill in the checkpoint path of a pretrained FAcodec model in the con
 
 ### Encode & reconstruct
 ```bash
-python reconstruct.py --source <source_wav>
+python reconstruct.py --source <source_wav> --ckpt-path <ckpt_path> --config-path <config_path>
 ```
-Model weights will be automatically downloaded from Hugging Face.  
+If no `--ckpt-path` or `--config-path` is specified, model weights will be automatically downloaded from Hugging Face.  
 For China mainland users, add additional environment variable to specify huggingface endpoint:
 ```bash
 HF_ENDPOINT=https://hf-mirror.com python reconstruct_redecoder.py --source <source_wav> --target <target_wav>
@@ -92,9 +92,15 @@ where:
 
 ### Zero-shot voice conversion
 ```bash
-python reconstruct_redecoder.py --source <source_wav> --target <target_wav>
+python reconstruct_redecoder.py \
+    --source <source_wav> 
+    --target <target_wav> 
+    --codec-ckpt-path <codec_ckpt_path> 
+    --redecoder-ckpt-path <redecoder_ckpt_path> 
+    --codec-config-path <codec_config_path> 
+    --redecoder-config-path <redecoder_config_path>
 ```
-same as above, model weights will be automatically downloaded from Hugging Face.
+same as above, if no checkpoint path or config path is specified, model weights will be automatically downloaded from Hugging Face.
 
 ### Real-time voice conversion
 This codec is fully causal, so it can be used for real-time voice conversion.  

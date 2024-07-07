@@ -42,33 +42,49 @@ def preprocess(wave):
     mel_tensor = (torch.log(1e-5 + mel_tensor.unsqueeze(0)) - mean) / std
     return mel_tensor
 
+def load_redecoder(args):
+    if not args.redecoder_ckpt_path and not args.redecoder_config_path:
+        print("No checkpoint path or config path provided. Loading from huggingface model hub")
+        ckpt_path, config_path = load_custom_model_from_hf("Plachta/FAcodec-redecoder")
+    else:
+        ckpt_path = args.redecoder_ckpt_path
+        config_path = args.redecoder_config_path
 
-ckpt_path, config_path = load_custom_model_from_hf("Plachta/FAcodec")
+    config = yaml.safe_load(open(config_path))
+    model_params = recursive_munch(config['model_params'])
+    model = build_model(model_params, stage="redecoder")
 
-config = yaml.safe_load(open(config_path))
-model_params = recursive_munch(config['model_params'])
-codec_encoder = build_model(model_params, stage="codec")
+    ckpt_params = torch.load(ckpt_path, map_location="cpu")
 
-ckpt_params = torch.load(ckpt_path, map_location="cpu")
+    for key in model:
+        model[key].load_state_dict(ckpt_params[key])
 
-for key in codec_encoder:
-    codec_encoder[key].load_state_dict(ckpt_params[key])
+    _ = [model[key].eval() for key in model]
+    _ = [model[key].to(device) for key in model]
 
-ckpt_path, config_path = load_custom_model_from_hf("Plachta/FAcodec-redecoder")
+    return model
 
-config = yaml.safe_load(open(config_path))
-model_params = recursive_munch(config['model_params'])
-model = build_model(model_params, stage="redecoder")
+def load_codec_encoder(args):
+    if not args.codec_ckpt_path and not args.codec_config_path:
+        print("No checkpoint path or config path provided. Loading from huggingface model hub")
+        ckpt_path, config_path = load_custom_model_from_hf("Plachta/FAcodec")
+    else:
+        ckpt_path = args.codec_ckpt_path
+        config_path = args.codec_config_path
+    config = yaml.safe_load(open(config_path))
+    model_params = recursive_munch(config['model_params'])
+    model = build_model(model_params)
 
-ckpt_params = torch.load(ckpt_path, map_location="cpu")
+    ckpt_params = torch.load(ckpt_path, map_location="cpu")
+    ckpt_params = ckpt_params['net'] if 'net' in ckpt_params else ckpt_params # adapt to format of self-trained checkpoints
 
-for key in model:
-    model[key].load_state_dict(ckpt_params[key])
+    for key in ckpt_params:
+        model[key].load_state_dict(ckpt_params[key])
 
-_ = [model[key].eval() for key in model]
-_ = [model[key].to(device) for key in model]
-_ = [codec_encoder[key].eval() for key in codec_encoder]
-_ = [codec_encoder[key].to(device) for key in codec_encoder]
+    _ = [model[key].eval() for key in model]
+    _ = [model[key].to(device) for key in model]
+
+    return model
 
 def get_parameter_number(model):
     total_num = sum(p.numel() for p in model.parameters())
@@ -77,6 +93,8 @@ def get_parameter_number(model):
 
 @torch.no_grad()
 def main(args):
+    codec_encoder = load_codec_encoder(args)
+    model = load_redecoder(args)
     source = args.source
     target = args.target
     source_audio = librosa.load(source, sr=24000)[0]
@@ -114,5 +132,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=str, required=True)
     parser.add_argument("--target", type=str, required=True)
+    parser.add_argument("--codec-ckpt-path", type=str, default="")
+    parser.add_argument("--codec-config-path", type=str, default="")
+    parser.add_argument("--redecoder-ckpt-path", type=str, default="")
+    parser.add_argument("--redecoder-config-path", type=str, default="")
     args = parser.parse_args()
     main(args)
